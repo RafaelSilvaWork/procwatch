@@ -38,6 +38,55 @@ class AlertEngineTests(unittest.TestCase):
 
         self.assertEqual(len(self.received), 1)
 
+    def test_sustained_condition_notifies_only_once(self):
+        """Reproduz o caso relatado: CPU alta sustentada por vários ciclos
+        (15:28 56.5%, 15:30 60.0%, ...) não pode virar um alerta novo a
+        cada checagem - só um, no momento em que passou a valer."""
+        for cpu in [56.5, 58.0, 60.0, 61.2, 59.8, 62.0, 57.0]:
+            self.engine.check_processes([make_snapshot(pid=42, cpu=cpu)])
+
+        critical_alerts = [a for a in self.received if "CPU Crítica" in a.title]
+        self.assertEqual(len(critical_alerts), 0)  # nenhum desses cruza cpu_critical (95%)
+
+        # agora sim cruza o critico, repetidamente por varios ciclos
+        for _ in range(10):
+            self.engine.check_processes([make_snapshot(pid=42, cpu=99.0)])
+
+        critical_alerts = [a for a in self.received if "CPU Crítica" in a.title]
+        self.assertEqual(len(critical_alerts), 1, "deveria notificar so uma vez, nao a cada ciclo")
+
+    def test_condition_can_fire_again_after_recovering(self):
+        """Depois que a CPU volta ao normal e sobe de novo, deve poder
+        alertar de novo (não é "uma vez pra sempre", é "uma vez por
+        episódio")."""
+        engine = self.engine
+        engine.check_processes([make_snapshot(pid=7, cpu=99.0)])  # dispara
+        engine.check_processes([make_snapshot(pid=7, cpu=99.0)])  # continua ativo, nao dispara de novo
+        engine.check_processes([make_snapshot(pid=7, cpu=10.0)])  # recupera, condicao limpa
+        engine.check_processes([make_snapshot(pid=7, cpu=99.0)])  # novo episodio, dispara de novo
+
+        critical_alerts = [a for a in self.received if "CPU Crítica" in a.title]
+        self.assertEqual(len(critical_alerts), 2)
+
+    def test_known_high_cpu_windows_process_is_ignored(self):
+        self.engine.check_processes([make_snapshot(name="svchost.exe", cpu=100.0)])
+        self.engine.check_processes([make_snapshot(name="MsMpEng.exe", cpu=100.0)])
+
+        cpu_alerts = [a for a in self.received if "CPU" in a.title]
+        self.assertEqual(cpu_alerts, [])
+
+    def test_ignored_windows_process_still_alerts_on_memory(self):
+        """O ignore-list é só pra CPU - memória continua sendo checada."""
+        self.engine.check_processes([make_snapshot(name="svchost.exe", cpu=100.0, mem=95.0)])
+
+        mem_alerts = [a for a in self.received if "Memória" in a.title]
+        self.assertEqual(len(mem_alerts), 1)
+
+    def test_self_process_is_never_alerted(self):
+        self.engine.check_processes([make_snapshot(pid=os.getpid(), cpu=100.0, mem=100.0)])
+
+        self.assertEqual(self.received, [])
+
     def test_below_threshold_does_not_alert(self):
         self.engine.check_processes([make_snapshot(cpu=10.0, mem=10.0)])
 

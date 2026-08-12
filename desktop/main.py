@@ -115,11 +115,6 @@ class LogWatchMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("LogWatch v2 | Filtro de Logs por Processo")
-        self.setGeometry(100, 100, 1400, 800)
-
-        saved_geometry = load_window_geometry()
-        if saved_geometry:
-            self.restoreGeometry(saved_geometry)
 
         # Monitor roda a cada 2s (menos pesado)
         self.process_monitor_thread = ProcessMonitorThread(interval=2.0, max_processes=200)
@@ -158,6 +153,17 @@ class LogWatchMainWindow(QMainWindow):
 
         self.setup_ui()
 
+        # Precisa rodar DEPOIS do setup_ui(): setar a geometria antes dos
+        # widgets existirem faz o QMainWindowLayout sobrescrever o tamanho
+        # pedido pelo hint de tamanho do conteúdo assim que as abas/tabelas
+        # são adicionadas (a janela acabava ocupando quase a tela inteira).
+        saved_geometry = load_window_geometry()
+        if saved_geometry:
+            self.restoreGeometry(saved_geometry)
+            self._clamp_geometry_to_screen()
+        else:
+            self._apply_default_geometry()
+
         self.process_monitor_thread.processes_updated.connect(self.on_processes_updated)
         # Entrega os snapshots direto para a thread do worker (conexão em fila,
         # já que o worker mora em outra thread) - não passa pela UI.
@@ -175,6 +181,46 @@ class LogWatchMainWindow(QMainWindow):
         self.log_rescan_timer = QTimer(self)
         self.log_rescan_timer.timeout.connect(self._rescan_process_logs)
         self.log_rescan_timer.start(5_000)
+
+    def _apply_default_geometry(self):
+        """Tamanho proporcional à tela atual (75%), centralizado - em vez de
+        um tamanho fixo que pode ficar grande demais ou pequeno demais
+        dependendo da resolução do monitor."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.setGeometry(100, 100, 1400, 800)
+            return
+
+        available = screen.availableGeometry()
+        width = int(available.width() * 0.75)
+        height = int(available.height() * 0.75)
+        x = available.x() + (available.width() - width) // 2
+        y = available.y() + (available.height() - height) // 2
+        self.setGeometry(x, y, width, height)
+
+    def _clamp_geometry_to_screen(self):
+        """Se a geometria salva de uma sessão anterior não couber mais na
+        tela atual (monitor trocado, resolução diferente) ou estiver
+        colada em quase toda a área disponível, volta para o tamanho
+        proporcional padrão em vez de deixar a janela cobrindo a tela
+        inteira ou ficar fora dela.
+
+        O Windows já recorta sozinho uma geometria absurdamente grande
+        (ex.: 3x o tamanho da tela) para caber na tela - por isso não basta
+        checar se ela "excede" a área disponível, pois nesse ponto ela já
+        foi cortada para pouco menos que 100% da tela, e ainda assim não é
+        o tamanho proporcional que queremos."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        frame = self.frameGeometry()
+        too_big = (frame.width() >= available.width() * 0.95
+                   or frame.height() >= available.height() * 0.95)
+        off_screen = not available.intersects(frame)
+        if too_big or off_screen:
+            self._apply_default_geometry()
 
     def setup_ui(self):
         central_widget = QWidget()

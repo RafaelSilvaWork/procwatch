@@ -7,6 +7,7 @@ import time
 from typing import Callable, Dict, List, Optional, Set
 from datetime import datetime
 from .models import ProcessSnapshot
+from .security_check import SYSTEM_PROCESS_NAMES, is_suspicious_path
 from .window_utils import get_pids_with_visible_window
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,10 @@ def snapshot_from_pid(pid: int) -> Optional[ProcessSnapshot]:
         proc = psutil.Process(pid)
         with proc.oneshot():
             memory_info = proc.memory_info()
+            try:
+                exe_path = proc.exe()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                exe_path = ""
             return ProcessSnapshot(
                 pid=pid,
                 name=proc.name(),
@@ -30,6 +35,9 @@ def snapshot_from_pid(pid: int) -> Optional[ProcessSnapshot]:
                 io_write_mb=0.0,
                 status=proc.status(),
                 num_threads=proc.num_threads(),
+                exe_path=exe_path,
+                create_time=proc.create_time(),
+                is_suspicious_path=is_suspicious_path(proc.name(), exe_path),
             )
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return None
@@ -137,7 +145,7 @@ class ProcessMonitor:
             basic_data = []
             for proc in psutil.process_iter(
                 ['pid', 'name', 'cpu_percent', 'memory_percent', 'memory_info',
-                 'status', 'num_threads']
+                 'status', 'num_threads', 'create_time']
             ):
                 try:
                     info = proc.info
@@ -151,6 +159,23 @@ class ProcessMonitor:
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
 
+            # Verifica se algum processo com nome de sistema (svchost.exe,
+            # explorer.exe, ...) está rodando de fora de System32/SysWOW64 -
+            # sinal comum de malware disfarçado. Só chama .exe() (mais cara)
+            # para esse subconjunto pequeno, não para todos os processos.
+            suspicious_pids: Set[int] = set()
+            for pid, info in basic_data:
+                name = (info.get('name') or "").lower()
+                if name not in SYSTEM_PROCESS_NAMES:
+                    continue
+                try:
+                    exe_path = psutil.Process(pid).exe()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    exe_path = ""
+                info['exe'] = exe_path
+                if is_suspicious_path(info.get('name') or "", exe_path):
+                    suspicious_pids.add(pid)
+
             # Ordenar por CPU e pegar apenas TOP N
             basic_data.sort(
                 key=lambda x: x[1].get('cpu_percent') or 0.0,
@@ -161,10 +186,13 @@ class ProcessMonitor:
             with self._lock:
                 pinned_pids = set(self._pinned_pids)
 
+            # PIDs fixados e processos suspeitos nunca podem ser cortados do
+            # TOP N - um processo disfarçado com CPU baixa não pode
+            # simplesmente sumir da coleta sem ser detectado.
             present_pids = {pid for pid, _ in top_data}
-            missing_pinned = pinned_pids - present_pids
-            if missing_pinned:
-                extra = [entry for entry in basic_data if entry[0] in missing_pinned]
+            missing_pids = (pinned_pids | suspicious_pids) - present_pids
+            if missing_pids:
+                extra = [entry for entry in basic_data if entry[0] in missing_pids]
                 top_data = top_data + extra
 
             basic_data = top_data
@@ -177,10 +205,12 @@ class ProcessMonitor:
             for pid, info in basic_data:
                 memory_info = info.get('memory_info')
                 memory_mb = memory_info.rss / (1024 * 1024) if memory_info else 0.0
+                name = info.get('name') or "unknown"
+                exe_path = info.get('exe') or ""
 
                 snapshot = ProcessSnapshot(
                     pid=pid,
-                    name=info.get('name') or "unknown",
+                    name=name,
                     cpu_percent=info.get('cpu_percent') or 0.0,
                     memory_mb=memory_mb,
                     memory_percent=info.get('memory_percent') or 0.0,
@@ -189,6 +219,9 @@ class ProcessMonitor:
                     status=info.get('status') or "unknown",
                     num_threads=info.get('num_threads') or 0,
                     has_window=pid in window_pids,
+                    exe_path=exe_path,
+                    create_time=info.get('create_time') or 0.0,
+                    is_suspicious_path=pid in suspicious_pids,
                 )
                 snapshots.append(snapshot)
         

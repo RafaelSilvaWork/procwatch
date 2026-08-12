@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QTextEdit, QPushButton, QLabel, QTableWidget, QTableWidgetItem,
     QHeaderView, QComboBox, QSpinBox, QDialog, QFileDialog, QMessageBox,
-    QListWidget, QListWidgetItem, QSystemTrayIcon, QMenu, QStyle
+    QListWidget, QListWidgetItem, QSystemTrayIcon, QMenu, QStyle, QLineEdit
 )
 from PyQt6.QtCore import QThread, QObject, QTimer, pyqtSignal, Qt
 from PyQt6.QtGui import QColor, QFont
@@ -145,6 +145,7 @@ class LogWatchMainWindow(QMainWindow):
         self.displayed_processes: List[ProcessSnapshot] = []
         self._pid_to_process: dict = {}
         self._alert_counts = {"CRITICAL": 0, "ERROR": 0, "WARNING": 0, "INFO": 0}
+        self._table_filters: dict = {}
         self._closing = False
 
         self.setup_ui()
@@ -239,6 +240,13 @@ class LogWatchMainWindow(QMainWindow):
         table.itemClicked.connect(self.on_process_clicked)
         return table
 
+    def _build_filter_input(self, table: QTableWidget) -> QLineEdit:
+        """Campo de busca por nome para uma tabela de processos."""
+        filter_input = QLineEdit()
+        filter_input.setPlaceholderText("🔎 Filtrar por nome...")
+        filter_input.textChanged.connect(lambda text, t=table: self._apply_table_filter(t, text))
+        return filter_input
+
     def setup_tab_apps(self):
         """Aba só com aplicativos de verdade (processos com janela visível) -
         equivalente à aba "Apps" do Gerenciador de Tarefas do Windows."""
@@ -249,6 +257,8 @@ class LogWatchMainWindow(QMainWindow):
         layout.addWidget(info)
 
         self.table_apps = self._build_process_table()
+        self.apps_filter_input = self._build_filter_input(self.table_apps)
+        layout.addWidget(self.apps_filter_input)
         layout.addWidget(self.table_apps)
 
     def setup_tab_process_list(self):
@@ -260,6 +270,8 @@ class LogWatchMainWindow(QMainWindow):
         layout.addWidget(info)
 
         self.table_all_processes = self._build_process_table()
+        self.all_processes_filter_input = self._build_filter_input(self.table_all_processes)
+        layout.addWidget(self.all_processes_filter_input)
         layout.addWidget(self.table_all_processes)
 
     def setup_tab_selected_process(self):
@@ -448,15 +460,41 @@ class LogWatchMainWindow(QMainWindow):
             )
 
     @staticmethod
-    def _process_details_text(process: ProcessSnapshot) -> str:
+    def _format_uptime(create_time: float) -> str:
+        if not create_time:
+            return "desconhecido"
+        elapsed = max(0, datetime.now().timestamp() - create_time)
+        days, rest = divmod(int(elapsed), 86400)
+        hours, rest = divmod(rest, 3600)
+        minutes, seconds = divmod(rest, 60)
+        if days:
+            return f"{days}d {hours}h {minutes}min"
+        if hours:
+            return f"{hours}h {minutes}min"
+        if minutes:
+            return f"{minutes}min {seconds}s"
+        return f"{seconds}s"
+
+    @classmethod
+    def _process_details_text(cls, process: ProcessSnapshot) -> str:
+        aviso_suspeito = ""
+        if process.is_suspicious_path:
+            aviso_suspeito = (
+                "\n🚨 ATENÇÃO: nome de processo do sistema rodando de local"
+                " inesperado - possível disfarce de malware!\n"
+            )
+
+        exe_linha = f"Executável:        {process.exe_path}\n" if process.exe_path else ""
+
         return f"""
 🔍 INFORMAÇÕES DO PROCESSO SELECIONADO
 ═══════════════════════════════════════
-
+{aviso_suspeito}
 Nome:              {process.name}
 PID:               {process.pid}
 Status:            {process.status}
-
+Em execução há:    {cls._format_uptime(process.create_time)}
+{exe_linha}
 💻 RECURSOS:
 CPU:               {process.cpu_percent:.1f}%
 Memória:           {process.memory_mb:.1f} MB
@@ -648,6 +686,8 @@ Threads:           {process.num_threads}
         self.filtered_logs_text.append(f"[{nome} | {origem}] {linha}")
 
     def _row_color(self, process: ProcessSnapshot, thresholds: dict) -> QColor:
+        if process.is_suspicious_path:
+            return QColor(ALERT_COLORS["CRITICAL"])
         if (process.cpu_percent >= thresholds.get('cpu_critical', 95.0)
                 or process.memory_percent >= thresholds.get('memory_critical', 90.0)):
             return QColor(ALERT_COLORS["CRITICAL"])
@@ -693,7 +733,22 @@ Threads:           {process.num_threads}
 
             table.item(row, 0).setData(Qt.ItemDataRole.UserRole, process.pid)
         table.setSortingEnabled(True)
+        self._refilter_table(table)
         table.setUpdatesEnabled(True)
+
+    def _apply_table_filter(self, table: QTableWidget, text: str):
+        self._table_filters[table] = text.strip().lower()
+        self._refilter_table(table)
+
+    def _refilter_table(self, table: QTableWidget):
+        """Reaplica o filtro de nome atual da tabela - precisa rodar depois
+        de todo _populate_table, já que as linhas são reconstruídas por
+        índice a cada ciclo (o filtro anterior não sobrevive sozinho)."""
+        text = self._table_filters.get(table, "")
+        for row in range(table.rowCount()):
+            name_item = table.item(row, 1)
+            name = name_item.text().lower() if name_item else ""
+            table.setRowHidden(row, bool(text) and text not in name)
 
     def _refresh_monitored_processes_display(self):
         """A cada ciclo: acumula histórico de TODOS os processos monitorados

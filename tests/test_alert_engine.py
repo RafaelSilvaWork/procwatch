@@ -10,10 +10,12 @@ from backend.alert_engine import AlertEngine
 from backend.models import AlertSeverity, ProcessSnapshot
 
 
-def make_snapshot(pid=1234, name="test.exe", cpu=0.0, mem=0.0, status="running", mem_mb=100.0):
+def make_snapshot(pid=1234, name="test.exe", cpu=0.0, mem=0.0, status="running",
+                   mem_mb=100.0, is_suspicious_path=False):
     return ProcessSnapshot(
         pid=pid, name=name, cpu_percent=cpu, memory_mb=mem_mb,
         memory_percent=mem, io_read_mb=0.0, io_write_mb=0.0, status=status,
+        is_suspicious_path=is_suspicious_path,
     )
 
 
@@ -116,6 +118,19 @@ class AlertEngineTests(unittest.TestCase):
         leak_alerts = [a for a in self.received if "Vazamento" in a.title]
         self.assertEqual(len(leak_alerts), 1)
         self.assertEqual(leak_alerts[0].severity, AlertSeverity.WARNING)
+
+    def test_suspicious_path_triggers_critical_alert(self):
+        self.engine.check_processes([make_snapshot(name="svchost.exe", is_suspicious_path=True)])
+
+        suspicious_alerts = [a for a in self.received if "Suspeito" in a.title]
+        self.assertEqual(len(suspicious_alerts), 1)
+        self.assertEqual(suspicious_alerts[0].severity, AlertSeverity.CRITICAL)
+
+    def test_normal_path_does_not_trigger_suspicious_alert(self):
+        self.engine.check_processes([make_snapshot(name="svchost.exe", is_suspicious_path=False)])
+
+        suspicious_alerts = [a for a in self.received if "Suspeito" in a.title]
+        self.assertEqual(len(suspicious_alerts), 0)
 
     def test_stable_memory_does_not_trigger_leak_alert(self):
         self.engine.update_thresholds({'memory_leak_min_samples': 5, 'memory_leak_growth_mb': 20.0})

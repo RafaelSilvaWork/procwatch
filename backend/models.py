@@ -35,6 +35,9 @@ class ProcessSnapshot:
     timestamp: datetime = field(default_factory=datetime.now)
     num_threads: int = 0
     has_window: bool = False  # possui janela visível (é um "app aberto", não só um processo de fundo)
+    exe_path: str = ""  # caminho do executável (vazio se não foi possível ler)
+    create_time: float = 0.0  # timestamp (epoch) de quando o processo iniciou
+    is_suspicious_path: bool = False  # nome de processo do sistema rodando fora de System32/SysWOW64
 
     def __post_init__(self):
         if self.cpu_percent < 0 or self.cpu_percent > 100:

@@ -193,6 +193,29 @@ class AlertEngine:
                 )
                 self._suppress_for(alert_id, 120)
 
+        # Processo com nome de sistema rodando de local inesperado -
+        # sinal comum de malware disfarçado (ex.: "svchost.exe" fora de
+        # System32). Sempre CRITICAL, independente de CPU/memória.
+        if snapshot.is_suspicious_path:
+            alert_id = f"suspicious_path_{pid}"
+            if alert_id not in self._suppressed_alerts:
+                self._emit_alert(
+                    AlertEvent(
+                        title=f"Processo Suspeito - {snapshot.name}",
+                        message=(
+                            f"{snapshot.name} (PID {pid}) tem nome de processo do sistema "
+                            f"mas está rodando de {snapshot.exe_path or 'um local desconhecido'} "
+                            f"- possível disfarce de malware."
+                        ),
+                        severity=AlertSeverity.CRITICAL,
+                        source=AlertSource.PROCESS,
+                        process_pid=pid,
+                        process_name=snapshot.name,
+                        extra_data={'exe_path': snapshot.exe_path}
+                    )
+                )
+                self._suppress_for(alert_id, 300)
+
     def _check_memory_trend(self, snapshot: ProcessSnapshot, history: List[ProcessSnapshot]) -> None:
         """Detecta memória que só cresce ao longo da janela de histórico,
         sem nunca cair - sintoma clássico de vazamento. Diferente do

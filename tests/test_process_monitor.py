@@ -17,7 +17,13 @@ class ProcessMonitorTests(unittest.TestCase):
         monitor = ProcessMonitor(max_processes=5)
         snapshots = monitor._collect_all_processes()
 
-        self.assertLessEqual(len(snapshots), 5)
+        # max_processes é um teto "flexível": PIDs fixados e processos com
+        # caminho suspeito sempre sobrevivem ao corte, então o resultado
+        # pode passar um pouco de 5 numa máquina real - o que importa aqui
+        # é que o corte está funcionando (não devolvendo todos os processos
+        # do sistema) e que os snapshots são válidos.
+        self.assertLessEqual(len(snapshots), 20)
+        self.assertGreater(len(snapshots), 0)
         for snapshot in snapshots:
             self.assertIsInstance(snapshot, ProcessSnapshot)
             # System Idle Process (PID 0) reporta cpu_percent como tempo
@@ -100,6 +106,44 @@ class ProcessMonitorTests(unittest.TestCase):
         pids = {s.pid for s in snapshots}
         self.assertIn(999, pids, "processo fixado não pode sumir mesmo fora do TOP N por CPU")
         self.assertEqual(len(snapshots), 3)
+
+    def test_suspicious_process_survives_top_n_cutoff_and_is_flagged(self):
+        """Um "svchost.exe" falso rodando de local suspeito não pode sumir
+        do corte por CPU baixa - ele precisa aparecer e vir marcado."""
+        monitor = ProcessMonitor(max_processes=1)
+
+        class FakeProc:
+            def __init__(self, pid, cpu, name):
+                self.pid = pid
+                self.info = {
+                    'pid': pid, 'name': name, 'cpu_percent': cpu,
+                    'memory_percent': 0.0, 'memory_info': None,
+                    'status': 'running', 'num_threads': 1,
+                }
+
+        fake_processes = [
+            FakeProc(1, 90.0, 'real.exe'),
+            FakeProc(666, 0.1, 'svchost.exe'),  # CPU baixa, mas nome de sistema
+        ]
+
+        class FakeExeProc:
+            def __init__(self, pid):
+                self._pid = pid
+
+            def exe(self):
+                if self._pid == 666:
+                    return r'C:\Users\alguem\AppData\Local\Temp\svchost.exe'
+                return r'C:\Windows\System32\real.exe'
+
+        with patch('backend.process_monitor.psutil.process_iter', return_value=fake_processes), \
+             patch('backend.process_monitor.psutil.Process', side_effect=lambda pid: FakeExeProc(pid)), \
+             patch('backend.process_monitor.get_pids_with_visible_window', return_value=set()):
+            snapshots = monitor._collect_all_processes()
+
+        by_pid = {s.pid: s for s in snapshots}
+        self.assertIn(666, by_pid, "processo suspeito não pode sumir mesmo fora do TOP N por CPU")
+        self.assertTrue(by_pid[666].is_suspicious_path)
+        self.assertFalse(by_pid[1].is_suspicious_path)
 
     def test_multiple_pinned_pids_all_survive_cutoff(self):
         """Vários processos monitorados ao mesmo tempo - todos precisam

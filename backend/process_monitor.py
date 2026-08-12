@@ -27,7 +27,12 @@ class ProcessMonitor:
         self._callback: Optional[Callable[[List[ProcessSnapshot]], None]] = None
         self._lock = threading.Lock()
         self._cached_snapshots: List[ProcessSnapshot] = []
-        
+        self._wake_event = threading.Event()
+
+    def request_refresh(self) -> None:
+        """Interrompe a espera do loop e força uma nova coleta imediatamente."""
+        self._wake_event.set()
+
     def start(self, on_update: Callable[[List[ProcessSnapshot]], None]) -> None:
         if self._running:
             return
@@ -55,8 +60,9 @@ class ProcessMonitor:
                     self._callback(snapshots)
             except Exception:
                 logger.exception("Erro ao coletar processos")
-            
-            time.sleep(self.update_interval)
+
+            self._wake_event.wait(self.update_interval)
+            self._wake_event.clear()
     
     def _collect_all_processes(self) -> List[ProcessSnapshot]:
         """

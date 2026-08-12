@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QTextEdit, QPushButton, QLabel, QTableWidget, QTableWidgetItem,
     QHeaderView, QComboBox, QSpinBox, QDialog, QFileDialog, QMessageBox
 )
-from PyQt6.QtCore import QThread, QObject, pyqtSignal, Qt
+from PyQt6.QtCore import QThread, QObject, QTimer, pyqtSignal, Qt
 from PyQt6.QtGui import QColor, QFont
 
 from backend.app import LogWatchApp
@@ -27,9 +27,22 @@ from desktop.app_settings import (
     load_thresholds, load_window_geometry, save_thresholds, save_window_geometry,
 )
 from desktop.process_list_dialog import ProcessListDialog
-from desktop.theme import ALERT_COLORS, COLOR_ACCENT, STYLESHEET
+from desktop.theme import ALERT_COLORS, COLOR_ACCENT, COLOR_TEXT_BRIGHT, STYLESHEET
 
 logger = logging.getLogger(__name__)
+
+_NUMERIC_COLUMNS = {0, 2, 3, 4}  # PID, CPU %, Memória (MB), Memória %
+
+
+class NumericTableWidgetItem(QTableWidgetItem):
+    """QTableWidgetItem que ordena numericamente em vez de como texto
+    (senão "10.0" viria antes de "9.0" na ordenação por clique no cabeçalho)."""
+
+    def __lt__(self, other):
+        try:
+            return float(self.text()) < float(other.text())
+        except ValueError:
+            return super().__lt__(other)
 
 
 class ProcessMonitorThread(QThread):
@@ -50,6 +63,9 @@ class ProcessMonitorThread(QThread):
     def stop(self):
         self.running = False
         self.monitor.stop()
+
+    def request_refresh(self):
+        self.monitor.request_refresh()
 
 
 class AlertWorker(QObject):
@@ -103,6 +119,8 @@ class LogWatchMainWindow(QMainWindow):
         self.selected_process: Optional[ProcessSnapshot] = None
         self.all_processes: List[ProcessSnapshot] = []
         self.displayed_processes: List[ProcessSnapshot] = []
+        self._pid_to_process: dict = {}
+        self._alert_counts = {"CRITICAL": 0, "ERROR": 0, "WARNING": 0, "INFO": 0}
 
         self.setup_ui()
 
@@ -115,7 +133,14 @@ class LogWatchMainWindow(QMainWindow):
 
         self.process_monitor_thread.start()
         self.alert_thread.start()
-    
+
+        # Rechecar periodicamente se o processo selecionado abriu arquivos
+        # de log novos (ex.: rotação diária), sem reiniciar o tail dos que
+        # já estão sendo acompanhados.
+        self.log_rescan_timer = QTimer(self)
+        self.log_rescan_timer.timeout.connect(self._rescan_process_logs)
+        self.log_rescan_timer.start(10_000)
+
     def setup_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -135,7 +160,7 @@ class LogWatchMainWindow(QMainWindow):
         header_layout.addWidget(select_btn)
 
         refresh_btn = QPushButton("🔄 Atualizar Lista")
-        refresh_btn.clicked.connect(self.refresh_process_list)
+        refresh_btn.clicked.connect(self.request_process_refresh)
         header_layout.addWidget(refresh_btn)
         
         header_layout.addStretch()
@@ -182,6 +207,7 @@ class LogWatchMainWindow(QMainWindow):
             "PID", "Nome", "CPU %", "Memória (MB)", "Memória %"
         ])
         self.table_all_processes.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table_all_processes.setSortingEnabled(True)
         self.table_all_processes.itemClicked.connect(self.on_process_clicked)
         layout.addWidget(self.table_all_processes)
     
@@ -214,6 +240,7 @@ class LogWatchMainWindow(QMainWindow):
         self.filtered_logs_text = QTextEdit()
         self.filtered_logs_text.setReadOnly(True)
         self.filtered_logs_text.setStyleSheet("font-size: 10pt;")
+        self.filtered_logs_text.document().setMaximumBlockCount(5000)
         layout.addWidget(self.filtered_logs_text)
 
         buttons_row = QHBoxLayout()
@@ -235,6 +262,7 @@ class LogWatchMainWindow(QMainWindow):
         controls_layout.addWidget(QLabel("Filtrar por:"))
         self.severity_filter = QComboBox()
         self.severity_filter.addItems(["Todos", "CRITICAL", "ERROR", "WARNING", "INFO"])
+        self.severity_filter.currentTextChanged.connect(self.on_severity_filter_changed)
         controls_layout.addWidget(self.severity_filter)
 
         settings_btn = QPushButton("⚙️ Configurar Alertas...")
@@ -249,11 +277,16 @@ class LogWatchMainWindow(QMainWindow):
         clear_btn.clicked.connect(self.clear_alerts)
         controls_layout.addWidget(clear_btn)
         controls_layout.addStretch()
+
+        self.alert_counts_label = QLabel()
+        self._update_alert_counts_label()
+        controls_layout.addWidget(self.alert_counts_label)
         layout.addLayout(controls_layout)
 
         self.text_alerts = QTextEdit()
         self.text_alerts.setReadOnly(True)
         self.text_alerts.setObjectName("alertsLog")
+        self.text_alerts.document().setMaximumBlockCount(3000)
         layout.addWidget(self.text_alerts)
     
     # ─── SLOTS (funções) ───
@@ -264,10 +297,17 @@ class LogWatchMainWindow(QMainWindow):
         self.update_process_list()
     
     def on_process_clicked(self, item):
-        """Quando clica em um processo na tabela."""
-        row = item.row()
-        if row >= 0 and row < len(self.displayed_processes):
-            process = self.displayed_processes[row]
+        """Quando clica em um processo na tabela.
+
+        Busca o processo pelo PID guardado na célula (não pelo índice da
+        linha) - a tabela pode estar ordenada por qualquer coluna (clique no
+        cabeçalho), então a posição da linha não corresponde mais à ordem de
+        self.displayed_processes."""
+        pid_item = self.table_all_processes.item(item.row(), 0)
+        if pid_item is None:
+            return
+        process = self._pid_to_process.get(pid_item.data(Qt.ItemDataRole.UserRole))
+        if process is not None:
             self.select_process(process)
 
     def open_process_list_dialog(self):
@@ -275,6 +315,25 @@ class LogWatchMainWindow(QMainWindow):
         dialog = ProcessListDialog(self.all_processes, self)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_process:
             self.select_process(dialog.selected_process)
+
+    def request_process_refresh(self):
+        """Força uma nova varredura imediata (não só reexibe o último snapshot)."""
+        self.process_monitor_thread.request_refresh()
+        self.statusBar().showMessage("Atualizando lista de processos...", 2000)
+
+    def _rescan_process_logs(self):
+        """Chamado periodicamente: pega arquivos de log novos do processo
+        selecionado sem reiniciar o tail dos que já estão sendo lidos."""
+        if self.selected_process is None:
+            return
+
+        log_files = self.log_watch_app.sync_process_logs(
+            self.selected_process.pid,
+            lambda path, linha: self.log_line_received.emit(path, linha),
+        )
+        if log_files:
+            nomes = ", ".join(os.path.basename(p) for p in log_files)
+            self.filtered_logs_label.setText(f"Logs do processo (em tempo real) — {nomes}")
 
     def select_process(self, process: ProcessSnapshot):
         """Seleciona um processo para monitorar."""
@@ -338,15 +397,32 @@ Threads:           {process.num_threads}
         nome = os.path.basename(path)
         self.filtered_logs_text.append(f"[{nome}] {linha}")
     
+    def _row_color(self, process: ProcessSnapshot, thresholds: dict) -> QColor:
+        if (process.cpu_percent >= thresholds.get('cpu_critical', 95.0)
+                or process.memory_percent >= thresholds.get('memory_critical', 90.0)):
+            return QColor(ALERT_COLORS["CRITICAL"])
+        if (process.cpu_percent >= thresholds.get('cpu_warning', 80.0)
+                or process.memory_percent >= thresholds.get('memory_warning', 75.0)):
+            return QColor(ALERT_COLORS["WARNING"])
+        return QColor(COLOR_TEXT_BRIGHT)
+
     def refresh_process_list(self):
         """Atualiza a lista de processos."""
-        # Ordenar por CPU
+        # Ordem de inserção (a exibida depende do que o usuário clicou no
+        # cabeçalho, já que setSortingEnabled(True) está ativo)
         self.displayed_processes = sorted(self.all_processes, key=lambda p: p.cpu_percent, reverse=True)
+        self._pid_to_process = {p.pid: p for p in self.displayed_processes}
+        thresholds = self.alert_worker.engine.thresholds
 
         # Atualizar tabela, reaproveitando células existentes em vez de
-        # recriá-las (evita relayout repetido com resize mode Stretch)
+        # recriá-las (evita relayout repetido com resize mode Stretch).
+        # Ordenação desligada durante o update: senão o Qt reordena linhas
+        # no meio do loop e a atualização por índice (row, col) corrompe os
+        # dados. setSortingEnabled(True) no final reaplica a ordenação que
+        # o usuário tinha escolhido (se alguma).
         table = self.table_all_processes
         table.setUpdatesEnabled(False)
+        table.setSortingEnabled(False)
         table.setRowCount(len(self.displayed_processes))
         for row, process in enumerate(self.displayed_processes):
             values = (
@@ -359,9 +435,17 @@ Threads:           {process.num_threads}
             for col, value in enumerate(values):
                 item = table.item(row, col)
                 if item is None:
-                    table.setItem(row, col, QTableWidgetItem(value))
+                    item = NumericTableWidgetItem(value) if col in _NUMERIC_COLUMNS else QTableWidgetItem(value)
+                    table.setItem(row, col, item)
                 else:
                     item.setText(value)
+
+            table.item(row, 0).setData(Qt.ItemDataRole.UserRole, process.pid)
+
+            row_color = self._row_color(process, thresholds)
+            for col in range(len(values)):
+                table.item(row, col).setForeground(row_color)
+        table.setSortingEnabled(True)
         table.setUpdatesEnabled(True)
 
         selected = (
@@ -379,11 +463,33 @@ Threads:           {process.num_threads}
     
     def on_alert_triggered(self, alert: AlertEvent):
         """Callback quando um alerta é disparado."""
-        self.add_alert_to_display(alert)
-        
+        self._alert_counts[alert.severity.value] = self._alert_counts.get(alert.severity.value, 0) + 1
+        self._update_alert_counts_label()
+
+        if self._alert_matches_filter(alert):
+            self.add_alert_to_display(alert)
+
         if alert.severity == AlertSeverity.CRITICAL:
             self.tabs.setCurrentIndex(3)  # Ir para aba de alertas
-    
+
+    def _alert_matches_filter(self, alert: AlertEvent) -> bool:
+        selected = self.severity_filter.currentText()
+        return selected == "Todos" or alert.severity.value == selected
+
+    def on_severity_filter_changed(self, _text: str):
+        """Re-renderiza os alertas recentes aplicando o filtro selecionado."""
+        self.text_alerts.clear()
+        alerts = self.alert_worker.engine.get_recent_alerts(limit=1000)  # mais recente primeiro
+        for alert in reversed(alerts):  # exibir em ordem cronológica
+            if self._alert_matches_filter(alert):
+                self.add_alert_to_display(alert)
+
+    def _update_alert_counts_label(self):
+        c = self._alert_counts
+        self.alert_counts_label.setText(
+            f"🔴 {c['CRITICAL']}  🟠 {c['ERROR']}  🟡 {c['WARNING']}  🔵 {c['INFO']}"
+        )
+
     def add_alert_to_display(self, alert: AlertEvent):
         """Adiciona um alerta ao display."""
         color = ALERT_COLORS.get(alert.severity.value, ALERT_COLORS["INFO"])
@@ -391,13 +497,15 @@ Threads:           {process.num_threads}
         html = f'<p style="color: {color};"><b>[{alert.timestamp.strftime("%H:%M:%S")}]</b> '
         html += f'<b>{alert.severity.value}</b> - {alert.title}<br>'
         html += f'<i>{alert.message}</i></p>'
-        
+
         self.text_alerts.insertHtml(html)
-    
+
     def clear_alerts(self):
         """Limpa os alertas."""
         self.alert_worker.engine.clear_alerts()
         self.text_alerts.clear()
+        self._alert_counts = {"CRITICAL": 0, "ERROR": 0, "WARNING": 0, "INFO": 0}
+        self._update_alert_counts_label()
 
     def open_alert_settings_dialog(self):
         """Abre o diálogo de configuração dos thresholds de alerta."""
@@ -481,6 +589,7 @@ Threads:           {process.num_threads}
     def closeEvent(self, event):
         """Ao fechar a janela."""
         save_window_geometry(self.saveGeometry())
+        self.log_rescan_timer.stop()
         self.process_monitor_thread.stop()
         self.log_watch_app.stop_all()
         self.alert_thread.quit()

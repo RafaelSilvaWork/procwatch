@@ -3,7 +3,7 @@
 from typing import Dict
 
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QSpinBox,
+    QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QMessageBox, QSpinBox,
 )
 
 
@@ -38,6 +38,15 @@ class AlertSettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
+
+    def accept(self) -> None:
+        if self.cpu_warning.value() >= self.cpu_critical.value():
+            QMessageBox.warning(self, "Valores inválidos", "O aviso de CPU deve ser menor que o crítico.")
+            return
+        if self.memory_warning.value() >= self.memory_critical.value():
+            QMessageBox.warning(self, "Valores inválidos", "O aviso de memória deve ser menor que o crítico.")
+            return
+        super().accept()
 
     @staticmethod
     def _percent_spinbox(value: float) -> QDoubleSpinBox:

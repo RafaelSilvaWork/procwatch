@@ -52,6 +52,29 @@ class LogWatchApp:
 
         return log_files
 
+    def sync_process_logs(self, pid: int, on_line: Callable[[str, str], None]) -> List[str]:
+        """Descobre arquivos de log NOVOS abertos pelo processo e passa a
+        monitorá-los, sem reiniciar o tail dos que já estão sendo
+        acompanhados (ao contrário de watch_process_logs). Útil para pegar
+        logs criados/abertos depois da seleção inicial (ex.: rotação diária).
+        Retorna todos os caminhos atualmente monitorados para este processo."""
+        for path in find_log_files(pid):
+            if path in self._stop_events:
+                continue
+
+            stop_event = threading.Event()
+            self._stop_events[path] = stop_event
+
+            thread = threading.Thread(
+                target=monitorar_arquivo,
+                args=(path, lambda linha, p=path: on_line(p, linha), stop_event),
+                daemon=True,
+            )
+            self._threads[path] = thread
+            thread.start()
+
+        return list(self._stop_events.keys())
+
     def stop_all(self) -> None:
         """Para o monitoramento de todos os arquivos ativos."""
         for stop_event in self._stop_events.values():

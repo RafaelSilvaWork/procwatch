@@ -2,7 +2,9 @@
 
 import os
 import sys
+import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -47,6 +49,30 @@ class ProcessMonitorTests(unittest.TestCase):
 
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0].pid, 1)
+
+    def test_request_refresh_burst_does_not_collect_faster_than_minimum(self):
+        """request_refresh() em rajada não pode fazer duas coletas reais
+        colarem muito perto uma da outra - senão cpu_percent() calcula com
+        um denominador de tempo perto de zero e infla o valor para ~100%
+        em processos que não têm nada de errado (bug real que já vimos
+        acontecer)."""
+        monitor = ProcessMonitor(update_interval=5.0, max_processes=1)
+        monitor.MIN_COLLECT_INTERVAL = 0.2  # acelera o teste
+
+        collect_times = []
+        with patch.object(monitor, '_collect_all_processes', side_effect=lambda: collect_times.append(time.monotonic()) or []):
+            monitor.start(lambda snapshots: None)
+            # dispara uma rajada de refreshes bem rápida
+            for _ in range(5):
+                monitor.request_refresh()
+                time.sleep(0.02)
+            time.sleep(0.5)
+            monitor.stop()
+
+        self.assertGreaterEqual(len(collect_times), 2)
+        gaps = [b - a for a, b in zip(collect_times, collect_times[1:])]
+        for gap in gaps:
+            self.assertGreaterEqual(gap, monitor.MIN_COLLECT_INTERVAL - 0.05)
 
 
 if __name__ == "__main__":

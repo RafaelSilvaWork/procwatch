@@ -37,7 +37,18 @@ def snapshot_from_pid(pid: int) -> Optional[ProcessSnapshot]:
 
 class ProcessMonitor:
     """Monitor de processos com atualização a cada 1 segundo (OTIMIZADO)."""
-    
+
+    # psutil.cpu_percent(interval=None) divide o tempo de CPU consumido pelo
+    # tempo de parede desde a última amostra do mesmo processo. Se duas
+    # coletas acontecerem quase juntas (ex.: usuário clica "Atualizar Lista"
+    # logo após um ciclo natural), esse denominador fica perto de zero e
+    # qualquer atividade normal de CPU produz uma razão inflada - que o
+    # ProcessSnapshot então arredonda para exatamente 100.0%, gerando
+    # falsos alertas de "CPU crítica" em processos que não têm nada de
+    # errado. Por isso nunca deixamos duas coletas reais acontecerem mais
+    # perto que MIN_COLLECT_INTERVAL, mesmo com request_refresh() em rajada.
+    MIN_COLLECT_INTERVAL = 1.0
+
     def __init__(self, update_interval: float = 1.0, max_processes: int = 100):
         """
         Args:
@@ -73,13 +84,19 @@ class ProcessMonitor:
     
     def _monitor_loop(self) -> None:
         """Loop principal de monitoramento (executa em thread separada)."""
+        last_collect = 0.0
         while self._running:
+            elapsed = time.monotonic() - last_collect
+            if elapsed < self.MIN_COLLECT_INTERVAL:
+                time.sleep(self.MIN_COLLECT_INTERVAL - elapsed)
+
             try:
                 snapshots = self._collect_all_processes()
-                
+                last_collect = time.monotonic()
+
                 with self._lock:
                     self._cached_snapshots = snapshots
-                
+
                 if self._callback:
                     self._callback(snapshots)
             except Exception:

@@ -87,6 +87,26 @@ class AlertEngineTests(unittest.TestCase):
 
         self.assertEqual(self.received, [])
 
+    def test_process_exit_with_error_code_triggers_alert(self):
+        """Ao contrário das palavras-chave genéricas de aviso, um processo
+        que você lançou/está monitorando encerrando com erro é um evento
+        estruturado - continua alertando mesmo com o texto livre desligado."""
+        self.engine.check_process_exit("meuapp.exe", pid=555, exit_code=1)
+
+        self.assertEqual(len(self.received), 1)
+        self.assertEqual(self.received[0].severity, AlertSeverity.WARNING)
+
+    def test_process_exit_with_code_zero_does_not_alert(self):
+        self.engine.check_process_exit("meuapp.exe", pid=555, exit_code=0)
+
+        self.assertEqual(self.received, [])
+
+    def test_process_exit_same_code_is_suppressed_on_repeat(self):
+        self.engine.check_process_exit("meuapp.exe", pid=555, exit_code=1)
+        self.engine.check_process_exit("meuapp.exe", pid=555, exit_code=1)
+
+        self.assertEqual(len(self.received), 1)
+
     def test_below_threshold_does_not_alert(self):
         self.engine.check_processes([make_snapshot(cpu=10.0, mem=10.0)])
 
@@ -111,11 +131,14 @@ class AlertEngineTests(unittest.TestCase):
         self.assertEqual(len(self.received), 1)
         self.assertEqual(self.received[0].severity, AlertSeverity.CRITICAL)
 
-    def test_warning_log_keyword_triggers_alert(self):
+    def test_generic_warning_keyword_no_longer_triggers_alert(self):
+        """Palavras-chave genéricas de aviso ('timeout', 'failed', 'error'...)
+        pegam texto demais que não afeta o funcionamento de nada - só
+        erros críticos de verdade (ou palavras-chave que o usuário
+        escolheu explicitamente) devem alertar."""
         self.engine.check_log_entry("Connection timeout while contacting server")
 
-        self.assertEqual(len(self.received), 1)
-        self.assertEqual(self.received[0].severity, AlertSeverity.WARNING)
+        self.assertEqual(self.received, [])
 
     def test_update_thresholds_changes_behavior(self):
         self.engine.update_thresholds({'cpu_critical': 50.0})

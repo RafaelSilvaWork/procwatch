@@ -296,10 +296,15 @@ class AlertEngine:
                 self._suppress_for(alert_id, 300)
 
     def check_log_entry(self, message: str, source: AlertSource = AlertSource.APP_LOG) -> None:
+        """Erros críticos de verdade (fatal, crash, panic, corrupção de
+        memória...) sempre alertam. Palavras-chave genéricas de aviso
+        ('error', 'failed', 'timeout'...) pegam texto demais que não afeta
+        o funcionamento de nada - por isso não alertam mais por padrão,
+        só as que o usuário escolheu explicitamente adicionar."""
         message_lower = message.lower()
         with self._lock:
             critical_keywords = self.CRITICAL_ERROR_KEYWORDS + self._custom_critical_keywords
-            warning_keywords = self.WARNING_ERROR_KEYWORDS + self._custom_warning_keywords
+            warning_keywords = list(self._custom_warning_keywords)
 
         for keyword in critical_keywords:
             if keyword in message_lower:
@@ -331,7 +336,34 @@ class AlertEngine:
                         )
                     )
                     self._suppress_for(alert_id, 300)
-    
+
+    def check_process_exit(self, name: str, pid: int, exit_code: int) -> None:
+        """Processo lançado/monitorado pelo LogWatch encerrou. Ao contrário
+        de check_log_entry, é um evento estruturado (não depende de
+        casamento de palavra-chave em texto livre), então continua
+        alertando mesmo com as palavras-chave genéricas de aviso
+        desativadas - um processo que você está de fato acompanhando
+        crashar é exatamente o tipo de coisa que afeta o funcionamento."""
+        if exit_code == 0:
+            return
+
+        alert_id = f"process_exit_{pid}_{exit_code}"
+        if alert_id in self._suppressed_alerts:
+            return
+
+        self._emit_alert(
+            AlertEvent(
+                title=f"Processo Encerrado com Erro - {name}",
+                message=f"{name} (PID {pid}) encerrou com código de saída {exit_code}",
+                severity=AlertSeverity.WARNING,
+                source=AlertSource.PROCESS,
+                process_pid=pid,
+                process_name=name,
+                extra_data={'exit_code': exit_code}
+            )
+        )
+        self._suppress_for(alert_id, 60)
+
     def _emit_alert(self, alert: AlertEvent) -> None:
         with self._lock:
             self._alerts.append(alert)

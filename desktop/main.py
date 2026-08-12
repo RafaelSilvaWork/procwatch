@@ -105,6 +105,9 @@ class AlertWorker(QObject):
     def check_log(self, message: str, source: AlertSource = AlertSource.APP_LOG):
         self.engine.check_log_entry(message, source)
 
+    def check_process_exit(self, name: str, pid: int, exit_code: int):
+        self.engine.check_process_exit(name, pid, exit_code)
+
 
 class LogWatchMainWindow(QMainWindow):
     """Janela principal do LogWatch - monitora múltiplos processos ao
@@ -756,7 +759,7 @@ Threads:           {process.num_threads}
             logger.info("%s encerrou normalmente (código 0).", name)
         else:
             logger.warning("%s encerrou com erro (código %s).", name, code)
-            self.alert_worker.check_log(f"{name} exited with error code {code}")
+            self.alert_worker.check_process_exit(name, pid, code)
 
     def _start_process_log_watch(self, process: ProcessSnapshot):
         """Descobre e passa a monitorar em tempo real os arquivos de log

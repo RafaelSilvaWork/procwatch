@@ -1,6 +1,7 @@
 import logging
 
 import win32evtlog
+import win32evtlogutil
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +34,12 @@ def buscar_logs_sistema(log_type="Application", num_registros=20):
             elif event.EventType == win32evtlog.EVENTLOG_WARNING_TYPE:
                 tipo_str = "AVISO"
                 
-            # Tenta extrair a mensagem descritiva do evento
+            # Tenta extrair a mensagem descritiva do evento. SafeFormatMessage
+            # (ao contrário de FormatMessage) já não levanta exceção sozinha
+            # em caso de DLL de mensagem ausente/evento binário - o
+            # try/except aqui é só uma segunda rede de segurança.
             try:
-                msg = win32evtlog.GetEventLogMessage(event)
+                msg = win32evtlogutil.SafeFormatMessage(event, log_type)
             except Exception:
                 msg = "Mensagem indisponível ou binária."
 

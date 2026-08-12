@@ -67,7 +67,7 @@ class ProcessMonitor:
         self._lock = threading.Lock()
         self._cached_snapshots: List[ProcessSnapshot] = []
         self._wake_event = threading.Event()
-        self._pinned_pid: Optional[int] = None
+        self._pinned_pids: Set[int] = set()
         self._window_pids_cache: Set[int] = set()
         self._collect_count = 0
 
@@ -75,13 +75,17 @@ class ProcessMonitor:
         """Interrompe a espera do loop e força uma nova coleta imediatamente."""
         self._wake_event.set()
 
-    def set_pinned_pid(self, pid: Optional[int]) -> None:
+    def pin_pid(self, pid: int) -> None:
         """Garante que este PID nunca seja cortado do corte TOP N por CPU -
-        para o processo que o usuário selecionou explicitamente não sumir
-        silenciosamente da coleta se a CPU dele cair (e outros 200+
-        processos tiverem CPU maior naquele instante)."""
+        para os processos que o usuário está monitorando explicitamente não
+        sumirem silenciosamente da coleta se a CPU deles cair (e outros
+        200+ processos tiverem CPU maior naquele instante)."""
         with self._lock:
-            self._pinned_pid = pid
+            self._pinned_pids.add(pid)
+
+    def unpin_pid(self, pid: int) -> None:
+        with self._lock:
+            self._pinned_pids.discard(pid)
 
     def start(self, on_update: Callable[[List[ProcessSnapshot]], None]) -> None:
         if self._running:
@@ -155,12 +159,13 @@ class ProcessMonitor:
             top_data = basic_data[:self.max_processes]
 
             with self._lock:
-                pinned_pid = self._pinned_pid
+                pinned_pids = set(self._pinned_pids)
 
-            if pinned_pid is not None and not any(pid == pinned_pid for pid, _ in top_data):
-                pinned_entry = next((entry for entry in basic_data if entry[0] == pinned_pid), None)
-                if pinned_entry is not None:
-                    top_data = top_data + [pinned_entry]
+            present_pids = {pid for pid, _ in top_data}
+            missing_pinned = pinned_pids - present_pids
+            if missing_pinned:
+                extra = [entry for entry in basic_data if entry[0] in missing_pinned]
+                top_data = top_data + extra
 
             basic_data = top_data
 

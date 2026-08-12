@@ -1,8 +1,9 @@
-"""Persistência de preferências do usuário (thresholds de alerta, geometria
-da janela) entre execuções, usando QSettings em formato .ini local."""
+"""Persistência de preferências do usuário (thresholds de alerta, palavras-
+chave customizadas, geometria da janela) entre execuções, usando QSettings
+em formato .ini local."""
 
 import os
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QByteArray, QSettings
 
@@ -14,6 +15,8 @@ _THRESHOLD_KEYS = (
     'cpu_warning', 'cpu_critical',
     'memory_warning', 'memory_critical',
     'sustained_high_cpu_secs',
+    'memory_leak_growth_mb',
+    'memory_leak_min_samples',
 )
 
 
@@ -42,6 +45,33 @@ def load_thresholds() -> Dict[str, float]:
                 pass
     settings.endGroup()
     return result
+
+
+def _normalize_string_list(value) -> List[str]:
+    """QSettings (formato .ini) devolve uma lista com 1 item como string
+    pura em vez de lista - normaliza os dois casos."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    return list(value)
+
+
+def save_custom_keywords(critical: List[str], warning: List[str]) -> None:
+    settings = _settings()
+    settings.beginGroup("keywords")
+    settings.setValue("critical", critical)
+    settings.setValue("warning", warning)
+    settings.endGroup()
+
+
+def load_custom_keywords() -> Tuple[List[str], List[str]]:
+    settings = _settings()
+    settings.beginGroup("keywords")
+    critical = _normalize_string_list(settings.value("critical"))
+    warning = _normalize_string_list(settings.value("warning"))
+    settings.endGroup()
+    return critical, warning
 
 
 def save_window_geometry(geometry: QByteArray) -> None:

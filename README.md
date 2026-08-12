@@ -4,13 +4,18 @@ Monitor de processos, logs e alertas para Windows, com interface em PyQt6.
 
 ## Funcionalidades
 
-- Monitoramento de processos em tempo real (CPU, memória, threads, status), com um
-  seletor de processo no estilo "Process List" do Cheat Engine (agrupando instâncias
-  repetidas do mesmo executável).
-- Descoberta e acompanhamento em tempo real dos arquivos de log abertos pelo processo
-  selecionado.
+- Monitoramento de **vários processos simultaneamente**, com um seletor de processo no
+  estilo "Process List" do Cheat Engine (agrupando instâncias repetidas do mesmo
+  executável) e separação entre "Aplicativos" (com janela) e processos de fundo.
+- Gráfico de histórico (CPU % / Memória %) por processo monitorado.
+- Descoberta e acompanhamento em tempo real dos arquivos de log e/ou stdout/stderr
+  (para processos lançados pelo próprio LogWatch) dos processos monitorados, com logs
+  combinados numa única aba, prefixados por processo.
 - Motor de alertas com thresholds configuráveis (CPU/memória crítica e de aviso, CPU
-  sustentada, processos zumbis), persistidos entre execuções.
+  sustentada, vazamento de memória, processos zumbis) e palavras-chave de detecção de
+  erro customizáveis pelo usuário, tudo persistido entre execuções.
+- Ícone na bandeja do sistema com notificações nativas para alertas críticos - fechar a
+  janela minimiza para a bandeja e o monitoramento continua em segundo plano.
 - Exportação de alertas (CSV) e de logs filtrados (texto).
 - Finalização de processo diretamente pela interface.
 - Leitura do Visualizador de Eventos do Windows (Application/System).
@@ -53,8 +58,9 @@ backend/            Lógica de monitoramento, alertas e leitura de logs (sem UI)
 desktop/             Interface gráfica (PyQt6)
   main.py                Janela principal
   process_list_dialog.py  Seletor de processo (estilo Cheat Engine)
-  alert_settings_dialog.py Diálogo de configuração de thresholds
+  alert_settings_dialog.py Diálogo de configuração de thresholds e palavras-chave
   app_settings.py           Persistência de preferências (QSettings)
+  history_chart.py           Gráfico leve de histórico (QPainter, sem dependências)
   theme.py                   Folha de estilo centralizada
 
 tests/               Testes automatizados (unittest, sem dependências extras)

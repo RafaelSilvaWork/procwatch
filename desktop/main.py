@@ -3,8 +3,9 @@ import logging
 import sys
 import os
 import threading
+from collections import deque
 from datetime import datetime
-from typing import List, Optional
+from typing import Deque, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -12,7 +13,8 @@ import psutil
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QTextEdit, QPushButton, QLabel, QTableWidget, QTableWidgetItem,
-    QHeaderView, QComboBox, QSpinBox, QDialog, QFileDialog, QMessageBox
+    QHeaderView, QComboBox, QSpinBox, QDialog, QFileDialog, QMessageBox,
+    QListWidget, QListWidgetItem, QSystemTrayIcon, QMenu, QStyle
 )
 from PyQt6.QtCore import QThread, QObject, QTimer, pyqtSignal, Qt
 from PyQt6.QtGui import QColor, QFont
@@ -24,14 +26,17 @@ from backend.process_monitor import ProcessMonitor, snapshot_from_pid
 from backend.alert_engine import AlertEngine
 from desktop.alert_settings_dialog import AlertSettingsDialog
 from desktop.app_settings import (
-    load_thresholds, load_window_geometry, save_thresholds, save_window_geometry,
+    load_custom_keywords, load_thresholds, load_window_geometry,
+    save_custom_keywords, save_thresholds, save_window_geometry,
 )
+from desktop.history_chart import HistoryChartWidget
 from desktop.process_list_dialog import ProcessListDialog
 from desktop.theme import ALERT_COLORS, COLOR_ACCENT, COLOR_TEXT_BRIGHT, STYLESHEET
 
 logger = logging.getLogger(__name__)
 
 _NUMERIC_COLUMNS = {0, 2, 3, 4}  # PID, CPU %, Memória (MB), Memória %
+_HISTORY_MAX_POINTS = 150
 
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -48,7 +53,7 @@ class NumericTableWidgetItem(QTableWidgetItem):
 class ProcessMonitorThread(QThread):
     """Thread para listar processos disponíveis."""
     processes_updated = pyqtSignal(list)
-    
+
     def __init__(self, interval: float = 2.0, max_processes: int = 200):
         super().__init__()
         self.monitor = ProcessMonitor(update_interval=interval, max_processes=max_processes)
@@ -69,8 +74,11 @@ class ProcessMonitorThread(QThread):
     def request_refresh(self):
         self.monitor.request_refresh()
 
-    def set_pinned_pid(self, pid: Optional[int]):
-        self.monitor.set_pinned_pid(pid)
+    def pin_pid(self, pid: int):
+        self.monitor.pin_pid(pid)
+
+    def unpin_pid(self, pid: int):
+        self.monitor.unpin_pid(pid)
 
 
 class AlertWorker(QObject):
@@ -91,9 +99,10 @@ class AlertWorker(QObject):
 
 
 class LogWatchMainWindow(QMainWindow):
-    """Janela principal do LogWatch - Versão com seleção de processo."""
+    """Janela principal do LogWatch - monitora múltiplos processos ao
+    mesmo tempo (CPU/memória/histórico/logs/alertas)."""
 
-    log_line_received = pyqtSignal(str, str)  # (caminho do arquivo, linha)
+    log_line_received = pyqtSignal(int, str, str)  # (pid, caminho/rótulo, linha)
 
     def __init__(self):
         super().__init__()
@@ -117,15 +126,26 @@ class LogWatchMainWindow(QMainWindow):
             self.alert_worker.engine.update_thresholds(saved_thresholds)
             logger.info("Thresholds de alerta carregados de logwatch.ini: %s", saved_thresholds)
 
-        # Monitoramento dos arquivos de log do processo selecionado
+        saved_critical_kw, saved_warning_kw = load_custom_keywords()
+        if saved_critical_kw or saved_warning_kw:
+            self.alert_worker.engine.set_custom_keywords(saved_critical_kw, saved_warning_kw)
+            logger.info("Palavras-chave customizadas carregadas: crit=%s aviso=%s", saved_critical_kw, saved_warning_kw)
+
+        # Monitoramento dos arquivos de log/stdout dos processos monitorados
         self.log_watch_app = LogWatchApp()
 
-        # Processo selecionado
-        self.selected_process: Optional[ProcessSnapshot] = None
+        # Processos monitorados (vários ao mesmo tempo)
+        self.monitored_pids: List[int] = []
+        self.active_pid: Optional[int] = None
+        self.active_process: Optional[ProcessSnapshot] = None
+        self.process_history: Dict[int, Deque[Tuple[float, float]]] = {}
+        self._monitored_names: Dict[int, str] = {}
+
         self.all_processes: List[ProcessSnapshot] = []
         self.displayed_processes: List[ProcessSnapshot] = []
         self._pid_to_process: dict = {}
         self._alert_counts = {"CRITICAL": 0, "ERROR": 0, "WARNING": 0, "INFO": 0}
+        self._closing = False
 
         self.setup_ui()
 
@@ -139,9 +159,9 @@ class LogWatchMainWindow(QMainWindow):
         self.process_monitor_thread.start()
         self.alert_thread.start()
 
-        # Rechecar periodicamente se o processo selecionado abriu arquivos
-        # de log novos (ex.: rotação diária), sem reiniciar o tail dos que
-        # já estão sendo acompanhados.
+        # Rechecar periodicamente se os processos monitorados abriram
+        # arquivos de log novos (ex.: rotação diária), sem reiniciar o
+        # tail dos que já estão sendo acompanhados.
         self.log_rescan_timer = QTimer(self)
         self.log_rescan_timer.timeout.connect(self._rescan_process_logs)
         self.log_rescan_timer.start(5_000)
@@ -149,16 +169,16 @@ class LogWatchMainWindow(QMainWindow):
     def setup_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        
-        main_layout = QVBoxLayout(central_widget)
-        
-        # ─── HEADER COM SELECTOR ───
-        header_layout = QHBoxLayout()
-        header_layout.addWidget(QLabel("📋 Processo monitorado:"))
 
-        self.selected_process_summary = QLabel("Nenhum")
-        self.selected_process_summary.setStyleSheet(f"color: {COLOR_ACCENT}; font-weight: bold;")
-        header_layout.addWidget(self.selected_process_summary)
+        main_layout = QVBoxLayout(central_widget)
+
+        # ─── HEADER ───
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel("📋 Processos monitorados:"))
+
+        self.monitored_summary_label = QLabel("Nenhum")
+        self.monitored_summary_label.setStyleSheet(f"color: {COLOR_ACCENT}; font-weight: bold;")
+        header_layout.addWidget(self.monitored_summary_label)
 
         select_btn = QPushButton("🎯 Selecionar Processo...")
         select_btn.clicked.connect(self.open_process_list_dialog)
@@ -171,10 +191,10 @@ class LogWatchMainWindow(QMainWindow):
         refresh_btn = QPushButton("🔄 Atualizar Lista")
         refresh_btn.clicked.connect(self.request_process_refresh)
         header_layout.addWidget(refresh_btn)
-        
+
         header_layout.addStretch()
         main_layout.addLayout(header_layout)
-        
+
         # ─── TABS ───
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
@@ -189,15 +209,15 @@ class LogWatchMainWindow(QMainWindow):
         self.setup_tab_process_list()
         self.tabs.addTab(self.tab_process_list, "📊 Todos os Processos")
 
-        # Aba 3: Processo Selecionado
+        # Aba 3: Processos monitorados
         self.tab_selected_process = QWidget()
         self.setup_tab_selected_process()
-        self.tabs.addTab(self.tab_selected_process, "🎯 Processo Selecionado")
+        self.tabs.addTab(self.tab_selected_process, "🎯 Processos Monitorados")
 
-        # Aba 4: Logs Filtrados
+        # Aba 4: Logs
         self.tab_filtered_logs = QWidget()
         self.setup_tab_filtered_logs()
-        self.tabs.addTab(self.tab_filtered_logs, "📝 Logs do Processo")
+        self.tabs.addTab(self.tab_filtered_logs, "📝 Logs")
 
         # Aba 5: Alertas
         self.tab_alerts = QWidget()
@@ -206,6 +226,8 @@ class LogWatchMainWindow(QMainWindow):
 
         # ─── BARRA DE STATUS ───
         self.statusBar().showMessage("Iniciando monitoramento...")
+
+        self._setup_tray_icon()
 
     def _build_process_table(self) -> QTableWidget:
         """Cria uma QTableWidget no formato usado pelas abas de processos."""
@@ -241,26 +263,56 @@ class LogWatchMainWindow(QMainWindow):
         layout.addWidget(self.table_all_processes)
 
     def setup_tab_selected_process(self):
-        """Aba com informações do processo selecionado."""
-        layout = QVBoxLayout(self.tab_selected_process)
+        """Aba com a lista de processos monitorados simultaneamente e os
+        detalhes + histórico do que está ativo (selecionado na lista)."""
+        outer_layout = QVBoxLayout(self.tab_selected_process)
+        split_layout = QHBoxLayout()
 
-        # Info do processo
-        self.selected_process_label = QLabel("Nenhum processo selecionado")
+        # ─── Lista de monitorados (esquerda) ───
+        list_widget_container = QWidget()
+        list_widget_container.setMaximumWidth(260)
+        list_layout = QVBoxLayout(list_widget_container)
+        list_layout.setContentsMargins(0, 0, 0, 0)
+
+        list_layout.addWidget(QLabel("Processos monitorados:"))
+        self.monitored_list_widget = QListWidget()
+        self.monitored_list_widget.currentItemChanged.connect(self._on_monitored_selection_changed)
+        list_layout.addWidget(self.monitored_list_widget)
+
+        stop_monitor_btn = QPushButton("🚫 Parar de Monitorar")
+        stop_monitor_btn.clicked.connect(self.stop_monitoring_active_process)
+        list_layout.addWidget(stop_monitor_btn)
+
+        split_layout.addWidget(list_widget_container)
+
+        # ─── Detalhes do processo ativo (direita) ───
+        details_container = QWidget()
+        details_layout = QVBoxLayout(details_container)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.selected_process_label = QLabel("Nenhum processo monitorado")
         self.selected_process_label.setStyleSheet(f"color: {COLOR_ACCENT}; font-size: 14pt; font-weight: bold;")
-        layout.addWidget(self.selected_process_label)
+        details_layout.addWidget(self.selected_process_label)
 
-        # Detalhes
         self.selected_process_details = QTextEdit()
         self.selected_process_details.setReadOnly(True)
         self.selected_process_details.setStyleSheet("font-size: 11pt;")
-        layout.addWidget(self.selected_process_details)
+        details_layout.addWidget(self.selected_process_details)
+
+        details_layout.addWidget(QLabel("Histórico (CPU % / Memória %):"))
+        self.history_chart = HistoryChartWidget(max_points=_HISTORY_MAX_POINTS)
+        details_layout.addWidget(self.history_chart)
 
         terminate_btn = QPushButton("🛑 Finalizar Processo")
-        terminate_btn.clicked.connect(self.terminate_selected_process)
-        layout.addWidget(terminate_btn)
-    
+        terminate_btn.clicked.connect(self.terminate_active_process)
+        details_layout.addWidget(terminate_btn)
+
+        split_layout.addWidget(details_container)
+        outer_layout.addLayout(split_layout)
+
     def setup_tab_filtered_logs(self):
-        """Aba com logs filtrados do processo selecionado."""
+        """Aba com os logs (em tempo real) de todos os processos monitorados,
+        combinados num único painel, prefixados por processo."""
         layout = QVBoxLayout(self.tab_filtered_logs)
 
         self.filtered_logs_label = QLabel("Logs do processo (em tempo real)")
@@ -282,7 +334,7 @@ class LogWatchMainWindow(QMainWindow):
         buttons_row.addWidget(export_btn)
         buttons_row.addStretch()
         layout.addLayout(buttons_row)
-    
+
     def setup_tab_alerts(self):
         """Aba de alertas."""
         layout = QVBoxLayout(self.tab_alerts)
@@ -317,14 +369,47 @@ class LogWatchMainWindow(QMainWindow):
         self.text_alerts.setObjectName("alertsLog")
         self.text_alerts.document().setMaximumBlockCount(3000)
         layout.addWidget(self.text_alerts)
-    
+
+    # ─── BANDEJA DO SISTEMA ───
+
+    def _setup_tray_icon(self):
+        self._tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+        if not self._tray_available:
+            logger.warning("Bandeja do sistema não disponível neste ambiente.")
+            return
+
+        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        self.tray_icon = QSystemTrayIcon(icon, self)
+        self.tray_icon.setToolTip("LogWatch")
+
+        tray_menu = QMenu()
+        show_action = tray_menu.addAction("Mostrar LogWatch")
+        show_action.triggered.connect(self._restore_from_tray)
+        quit_action = tray_menu.addAction("Sair")
+        quit_action.triggered.connect(self._quit)
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._restore_from_tray()
+
+    def _restore_from_tray(self):
+        self.showNormal()
+        self.activateWindow()
+
+    def _quit(self):
+        self._closing = True
+        self.close()
+
     # ─── SLOTS (funções) ───
-    
+
     def on_processes_updated(self, snapshots: List[ProcessSnapshot]):
         """Callback quando processos são listados."""
         self.all_processes = snapshots
         self.update_process_list()
-    
+
     def on_process_clicked(self, item):
         """Quando clica em um processo em qualquer uma das tabelas
         (Aplicativos ou Todos os Processos).
@@ -339,13 +424,13 @@ class LogWatchMainWindow(QMainWindow):
             return
         process = self._pid_to_process.get(pid_item.data(Qt.ItemDataRole.UserRole))
         if process is not None:
-            self.select_process(process)
+            self.add_monitored_process(process)
 
     def open_process_list_dialog(self):
         """Abre o seletor de processos (estilo Cheat Engine)."""
         dialog = ProcessListDialog(self.all_processes, self)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_process:
-            self.select_process(dialog.selected_process)
+            self.add_monitored_process(dialog.selected_process)
 
     def request_process_refresh(self):
         """Força uma nova varredura imediata (não só reexibe o último snapshot)."""
@@ -353,18 +438,14 @@ class LogWatchMainWindow(QMainWindow):
         self.statusBar().showMessage("Atualizando lista de processos...", 2000)
 
     def _rescan_process_logs(self):
-        """Chamado periodicamente: pega arquivos de log novos do processo
-        selecionado sem reiniciar o tail dos que já estão sendo lidos."""
-        if self.selected_process is None:
-            return
-
-        log_files = self.log_watch_app.sync_process_logs(
-            self.selected_process.pid,
-            lambda path, linha: self.log_line_received.emit(path, linha),
-        )
-        if log_files:
-            nomes = ", ".join(os.path.basename(p) for p in log_files)
-            self.filtered_logs_label.setText(f"Logs do processo (em tempo real) — {nomes}")
+        """Chamado periodicamente: pega arquivos de log novos de TODOS os
+        processos monitorados, sem reiniciar o tail dos que já estão sendo
+        lidos."""
+        for pid in list(self.monitored_pids):
+            self.log_watch_app.sync_process_logs(
+                pid,
+                lambda path, linha, p=pid: self.log_line_received.emit(p, path, linha),
+            )
 
     @staticmethod
     def _process_details_text(process: ProcessSnapshot) -> str:
@@ -384,28 +465,119 @@ Threads:           {process.num_threads}
 
 ⏱️  Atualizado em:   {process.timestamp.strftime('%H:%M:%S')}
 
-📌 Os logs deste processo aparecerão em tempo real na aba "Logs do Processo"
+📌 Os logs deste processo aparecem em tempo real na aba "Logs"
 """
 
-    def select_process(self, process: ProcessSnapshot):
-        """Seleciona um processo já existente para monitorar."""
-        self.selected_process = process
-        self.process_monitor_thread.set_pinned_pid(process.pid)
-        self.selected_process_label.setText(f"✓ Monitorando: {process.name} (PID: {process.pid})")
-        self.selected_process_details.setText(self._process_details_text(process))
-        self.selected_process_summary.setText(f"{process.name} (PID {process.pid})")
+    # ─── PROCESSOS MONITORADOS (múltiplos ao mesmo tempo) ───
 
-        # Trocar para os arquivos de log deste processo
-        self._start_process_log_watch(process)
+    def add_monitored_process(self, process: ProcessSnapshot, skip_log_watch: bool = False):
+        """Adiciona um processo à lista de monitorados (ou só o ativa, se já
+        estiver lá) e o exibe na aba "Processos Monitorados"."""
+        pid = process.pid
+        is_new = pid not in self.monitored_pids
 
-        # Mudar para aba "Processo Selecionado"
+        if is_new:
+            self.monitored_pids.append(pid)
+            self.process_monitor_thread.pin_pid(pid)
+            self.process_history[pid] = deque(maxlen=_HISTORY_MAX_POINTS)
+            self._monitored_names[pid] = process.name
+
+            item = QListWidgetItem(f"{process.name} (PID {pid})")
+            item.setData(Qt.ItemDataRole.UserRole, pid)
+            self.monitored_list_widget.addItem(item)
+
+            if not skip_log_watch:
+                self._start_process_log_watch(process)
+
+            self._update_monitored_summary()
+            self._update_logs_tab_label()
+
+        self._set_active_pid(pid, process)
         self.tabs.setCurrentIndex(self.tabs.indexOf(self.tab_selected_process))
+
+    def _set_active_pid(self, pid: int, process: Optional[ProcessSnapshot] = None):
+        """Troca qual processo monitorado está sendo exibido nos detalhes e
+        no gráfico de histórico (todos continuam sendo monitorados)."""
+        self.active_pid = pid
+        self.active_process = process or self._pid_to_process.get(pid)
+        if self.active_process is not None:
+            self.selected_process_label.setText(
+                f"✓ Monitorando: {self.active_process.name} (PID: {self.active_process.pid})"
+            )
+            self.selected_process_details.setText(self._process_details_text(self.active_process))
+
+        self.monitored_list_widget.blockSignals(True)
+        for i in range(self.monitored_list_widget.count()):
+            item = self.monitored_list_widget.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == pid:
+                self.monitored_list_widget.setCurrentItem(item)
+                break
+        self.monitored_list_widget.blockSignals(False)
+
+        self.history_chart.clear_history()
+        for cpu, mem in self.process_history.get(pid, []):
+            self.history_chart.add_point(cpu, mem)
+
+    def _on_monitored_selection_changed(self, current, _previous):
+        if current is None:
+            return
+        pid = current.data(Qt.ItemDataRole.UserRole)
+        self._set_active_pid(pid, self._pid_to_process.get(pid))
+
+    def stop_monitoring_active_process(self):
+        """Remove o processo ativo da lista de monitorados (não o finaliza -
+        só para de acompanhar logs/alertas/histórico dele)."""
+        if self.active_pid is None:
+            return
+        self._stop_monitoring_pid(self.active_pid)
+
+    def _stop_monitoring_pid(self, pid: int):
+        if pid in self.monitored_pids:
+            self.monitored_pids.remove(pid)
+        self.process_monitor_thread.unpin_pid(pid)
+        self.log_watch_app.stop_watching_pid(pid)
+        self.process_history.pop(pid, None)
+        self._monitored_names.pop(pid, None)
+
+        for i in range(self.monitored_list_widget.count()):
+            item = self.monitored_list_widget.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == pid:
+                self.monitored_list_widget.takeItem(i)
+                break
+
+        if pid == self.active_pid:
+            if self.monitored_pids:
+                next_pid = self.monitored_pids[-1]
+                self._set_active_pid(next_pid, self._pid_to_process.get(next_pid))
+            else:
+                self.active_pid = None
+                self.active_process = None
+                self.selected_process_label.setText("Nenhum processo monitorado")
+                self.selected_process_details.clear()
+                self.history_chart.clear_history()
+
+        self._update_monitored_summary()
+        self._update_logs_tab_label()
+
+    def _update_monitored_summary(self):
+        if not self.monitored_pids:
+            self.monitored_summary_label.setText("Nenhum")
+            return
+        nomes = ", ".join(self._monitored_names.get(pid, str(pid)) for pid in self.monitored_pids)
+        self.monitored_summary_label.setText(f"{len(self.monitored_pids)} — {nomes}")
+
+    def _update_logs_tab_label(self):
+        if self.monitored_pids:
+            nomes = ", ".join(self._monitored_names.get(pid, str(pid)) for pid in self.monitored_pids)
+            self.filtered_logs_label.setText(f"Logs em tempo real — {nomes}")
+        else:
+            self.filtered_logs_label.setText("Logs do processo (em tempo real)")
 
     def open_and_monitor_process(self):
         """Abre um executável escolhido pelo usuário e passa a monitorá-lo:
         processo, stdout/stderr em tempo real (mais confiável que achar um
         arquivo de log logo na inicialização) e alerta se ele encerrar com
-        erro."""
+        erro. Não afeta os outros processos já monitorados."""
         path, _ = QFileDialog.getOpenFileName(
             self, "Abrir e Monitorar", "", "Executáveis (*.exe);;Todos os arquivos (*.*)"
         )
@@ -415,7 +587,7 @@ Threads:           {process.num_threads}
         try:
             proc = self.log_watch_app.launch_and_watch(
                 path,
-                lambda label, linha: self.log_line_received.emit(label, linha),
+                lambda pid, label, linha: self.log_line_received.emit(pid, label, linha),
                 self._on_launched_process_exit,
             )
         except OSError as e:
@@ -424,19 +596,11 @@ Threads:           {process.num_threads}
 
         logger.info("Processo lançado pelo LogWatch: %s (PID %s)", path, proc.pid)
 
-        self.filtered_logs_text.clear()
-        self.filtered_logs_label.setText(
-            f"Logs do processo (em tempo real) — stdout/stderr de {os.path.basename(path)}"
-        )
-
         snapshot = snapshot_from_pid(proc.pid)
         if snapshot is None:
             # Processo já encerrou antes de conseguirmos ler seus dados
             # (comum para executáveis muito rápidos) - a saída/código de
             # saída ainda chegam via _on_launched_process_exit.
-            self.selected_process_label.setText(
-                f"Processo {os.path.basename(path)} (PID {proc.pid}) já encerrou antes de ser inspecionado."
-            )
             self.statusBar().showMessage(
                 f"Processo lançado e encerrado rapidamente (PID {proc.pid}) — veja o resultado na aba de Logs.",
                 5000,
@@ -444,28 +608,21 @@ Threads:           {process.num_threads}
             self.tabs.setCurrentIndex(self.tabs.indexOf(self.tab_filtered_logs))
             return
 
-        # Ao contrário de select_process(): não chama _start_process_log_watch,
-        # pois isso reiniciaria o tail (stop_all) e derrubaria o
-        # acompanhamento de stdout/stderr que acabamos de montar. O rescan
-        # periódico (_rescan_process_logs) ainda vai somar arquivos de log
-        # que esse processo abrir, sem mexer no que já está sendo lido.
-        self.selected_process = snapshot
-        self.process_monitor_thread.set_pinned_pid(snapshot.pid)
-        self.selected_process_label.setText(
-            f"✓ Monitorando (lançado agora): {snapshot.name} (PID: {snapshot.pid})"
-        )
-        self.selected_process_details.setText(self._process_details_text(snapshot))
-        self.selected_process_summary.setText(f"{snapshot.name} (PID {snapshot.pid})")
-        self.tabs.setCurrentIndex(self.tabs.indexOf(self.tab_selected_process))
+        self._monitored_names[proc.pid] = snapshot.name
+        # log_watch_app já está acompanhando o stdout/stderr (launch_and_watch);
+        # skip_log_watch evita que add_monitored_process reinicie esse tail
+        # tentando descobrir arquivos de log (watch_process_logs pararia o
+        # mesmo PID que acabamos de começar a observar).
+        self.add_monitored_process(snapshot, skip_log_watch=True)
         self.statusBar().showMessage(f"Processo lançado: {os.path.basename(path)} (PID {proc.pid})", 5000)
 
     def _on_launched_process_exit(self, pid: int, code: int):
         """Chamado (em thread de fundo) quando um processo lançado pelo
-        LogWatch encerra - independentemente do que estiver selecionado
-        na tela no momento."""
-        name = self.selected_process.name if (self.selected_process and self.selected_process.pid == pid) else f"PID {pid}"
+        LogWatch encerra - independentemente do que estiver ativo na tela
+        no momento."""
+        name = self._monitored_names.get(pid, f"PID {pid}")
 
-        self.log_line_received.emit("processo", f"[LogWatch] {name} encerrou (código de saída {code})")
+        self.log_line_received.emit(pid, "processo", f"[LogWatch] {name} encerrou (código de saída {code})")
 
         if code == 0:
             logger.info("%s encerrou normalmente (código 0).", name)
@@ -475,27 +632,21 @@ Threads:           {process.num_threads}
 
     def _start_process_log_watch(self, process: ProcessSnapshot):
         """Descobre e passa a monitorar em tempo real os arquivos de log
-        abertos pelo processo selecionado."""
-        self.filtered_logs_text.clear()
+        abertos por este processo (sem afetar outros processos monitorados)."""
         log_files = self.log_watch_app.watch_process_logs(
             process.pid,
-            lambda path, linha: self.log_line_received.emit(path, linha),
+            lambda path, linha, p=process.pid: self.log_line_received.emit(p, path, linha),
         )
+        self._update_logs_tab_label()
+        if not log_files:
+            logger.info("Nenhum arquivo de log encontrado para %s (PID %s).", process.name, process.pid)
 
-        if log_files:
-            nomes = ", ".join(os.path.basename(p) for p in log_files)
-            self.filtered_logs_label.setText(f"Logs do processo (em tempo real) — {nomes}")
-        else:
-            self.filtered_logs_label.setText(
-                "Nenhum arquivo de log encontrado para este processo "
-                "(pode exigir permissão de administrador)"
-            )
-
-    def _append_filtered_log(self, path: str, linha: str):
+    def _append_filtered_log(self, pid: int, path: str, linha: str):
         """Recebe uma nova linha de log (já marshalled para a thread da UI)."""
-        nome = os.path.basename(path)
-        self.filtered_logs_text.append(f"[{nome}] {linha}")
-    
+        nome = self._monitored_names.get(pid, f"PID {pid}")
+        origem = os.path.basename(path)
+        self.filtered_logs_text.append(f"[{nome} | {origem}] {linha}")
+
     def _row_color(self, process: ProcessSnapshot, thresholds: dict) -> QColor:
         if (process.cpu_percent >= thresholds.get('cpu_critical', 95.0)
                 or process.memory_percent >= thresholds.get('memory_critical', 90.0)):
@@ -544,21 +695,24 @@ Threads:           {process.num_threads}
         table.setSortingEnabled(True)
         table.setUpdatesEnabled(True)
 
-    def _refresh_selected_process_display(self):
-        """Atualiza o painel "Processo Selecionado" (CPU/memória/etc.) com o
-        snapshot mais recente. Sem isso, o painel fica congelado com os
-        dados do instante da seleção para sempre, mesmo com o monitor
-        continuando a rodar normalmente."""
-        if self.selected_process is None:
-            return
+    def _refresh_monitored_processes_display(self):
+        """A cada ciclo: acumula histórico de TODOS os processos monitorados
+        (mesmo os que não estão em exibição agora) e atualiza o painel de
+        detalhes/gráfico apenas do que está ativo."""
+        for pid in list(self.monitored_pids):
+            fresh = self._pid_to_process.get(pid)
+            if fresh is None:
+                continue  # processo não apareceu neste ciclo (ex.: acabou de encerrar)
 
-        fresh = self._pid_to_process.get(self.selected_process.pid)
-        if fresh is None:
-            return  # processo não apareceu neste ciclo (ex.: acabou de encerrar)
+            self._monitored_names[pid] = fresh.name
+            history = self.process_history.setdefault(pid, deque(maxlen=_HISTORY_MAX_POINTS))
+            history.append((fresh.cpu_percent, fresh.memory_percent))
 
-        self.selected_process = fresh
-        self.selected_process_label.setText(f"✓ Monitorando: {fresh.name} (PID: {fresh.pid})")
-        self.selected_process_details.setText(self._process_details_text(fresh))
+            if pid == self.active_pid:
+                self.active_process = fresh
+                self.selected_process_label.setText(f"✓ Monitorando: {fresh.name} (PID: {fresh.pid})")
+                self.selected_process_details.setText(self._process_details_text(fresh))
+                self.history_chart.add_point(fresh.cpu_percent, fresh.memory_percent)
 
     def refresh_process_list(self):
         """Atualiza as listas de processos (Aplicativos e Todos os Processos)."""
@@ -570,21 +724,18 @@ Threads:           {process.num_threads}
 
         self._populate_table(self.table_apps, apps, thresholds)
         self._populate_table(self.table_all_processes, self.displayed_processes, thresholds)
-        self._refresh_selected_process_display()
+        self._refresh_monitored_processes_display()
 
-        selected = (
-            f" | Monitorando: {self.selected_process.name} (PID {self.selected_process.pid})"
-            if self.selected_process else ""
-        )
         self.statusBar().showMessage(
             f"Aplicativos: {len(apps)} | Processos: {len(self.displayed_processes)} "
-            f"| Última atualização: {datetime.now().strftime('%H:%M:%S')}{selected}"
+            f"| Monitorados: {len(self.monitored_pids)} "
+            f"| Última atualização: {datetime.now().strftime('%H:%M:%S')}"
         )
 
     def update_process_list(self):
         """Atualiza apenas o display."""
         self.refresh_process_list()
-    
+
     def on_alert_triggered(self, alert: AlertEvent):
         """Callback quando um alerta é disparado."""
         self._alert_counts[alert.severity.value] = self._alert_counts.get(alert.severity.value, 0) + 1
@@ -595,6 +746,10 @@ Threads:           {process.num_threads}
 
         if alert.severity == AlertSeverity.CRITICAL:
             self.tabs.setCurrentIndex(self.tabs.indexOf(self.tab_alerts))
+            if getattr(self, '_tray_available', False):
+                self.tray_icon.showMessage(
+                    alert.title, alert.message, QSystemTrayIcon.MessageIcon.Critical, 6000
+                )
 
     def _alert_matches_filter(self, alert: AlertEvent) -> bool:
         selected = self.severity_filter.currentText()
@@ -632,13 +787,20 @@ Threads:           {process.num_threads}
         self._update_alert_counts_label()
 
     def open_alert_settings_dialog(self):
-        """Abre o diálogo de configuração dos thresholds de alerta."""
-        dialog = AlertSettingsDialog(self.alert_worker.engine.thresholds, self)
+        """Abre o diálogo de configuração dos thresholds e palavras-chave de alerta."""
+        current_keywords = self.alert_worker.engine.get_custom_keywords()
+        dialog = AlertSettingsDialog(self.alert_worker.engine.thresholds, current_keywords, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_thresholds = dialog.values()
             self.alert_worker.engine.update_thresholds(new_thresholds)
             save_thresholds(new_thresholds)
-            logger.info("Thresholds de alerta atualizados: %s", new_thresholds)
+
+            critical_kw, warning_kw = dialog.keywords()
+            self.alert_worker.engine.set_custom_keywords(critical_kw, warning_kw)
+            save_custom_keywords(critical_kw, warning_kw)
+
+            logger.info("Configurações de alerta atualizadas: thresholds=%s keywords=%s",
+                        new_thresholds, (critical_kw, warning_kw))
 
     def export_alerts(self):
         """Exporta os alertas recentes para um arquivo CSV."""
@@ -664,7 +826,7 @@ Threads:           {process.num_threads}
         self.statusBar().showMessage(f"Alertas exportados para {path}", 5000)
 
     def export_filtered_logs(self):
-        """Exporta o conteúdo atual da aba de logs do processo para um arquivo de texto."""
+        """Exporta o conteúdo atual da aba de logs para um arquivo de texto."""
         path, _ = QFileDialog.getSaveFileName(self, "Exportar Logs", "logs.txt", "Texto (*.txt)")
         if not path:
             return
@@ -674,23 +836,25 @@ Threads:           {process.num_threads}
 
         self.statusBar().showMessage(f"Logs exportados para {path}", 5000)
 
-    def terminate_selected_process(self):
-        """Finaliza o processo atualmente selecionado, após confirmação."""
-        if self.selected_process is None:
-            QMessageBox.information(self, "Nenhum processo", "Selecione um processo primeiro.")
+    def terminate_active_process(self):
+        """Finaliza o processo atualmente ativo, após confirmação."""
+        if self.active_pid is None:
+            QMessageBox.information(self, "Nenhum processo", "Selecione um processo monitorado primeiro.")
             return
+
+        pid = self.active_pid
+        name = self._monitored_names.get(pid, f"PID {pid}")
 
         reply = QMessageBox.question(
             self,
             "Confirmar finalização",
-            f"Finalizar o processo {self.selected_process.name} (PID {self.selected_process.pid})?",
+            f"Finalizar o processo {name} (PID {pid})?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        pid, name = self.selected_process.pid, self.selected_process.name
         try:
             proc = psutil.Process(pid)
             proc.terminate()
@@ -704,15 +868,24 @@ Threads:           {process.num_threads}
             return
 
         logger.info("Processo %s (PID %s) finalizado pelo usuário.", name, pid)
-        self.log_watch_app.stop_all()
-        self.process_monitor_thread.set_pinned_pid(None)
-        self.selected_process_label.setText(f"Processo {name} (PID {pid}) finalizado.")
-        self.selected_process_summary.setText("Nenhum")
-        self.selected_process = None
+        self._stop_monitoring_pid(pid)
         self.statusBar().showMessage(f"Processo {name} (PID {pid}) finalizado.", 5000)
 
     def closeEvent(self, event):
-        """Ao fechar a janela."""
+        """Ao fechar a janela: minimiza para a bandeja (se disponível) em
+        vez de encerrar, para o monitoramento continuar em segundo plano.
+        Só encerra de verdade via menu da bandeja ("Sair")."""
+        if getattr(self, '_tray_available', False) and not self._closing:
+            event.ignore()
+            self.hide()
+            self.tray_icon.showMessage(
+                "LogWatch",
+                "Continua monitorando em segundo plano. Clique com o botão direito no ícone da bandeja para sair.",
+                QSystemTrayIcon.MessageIcon.Information,
+                4000,
+            )
+            return
+
         save_window_geometry(self.saveGeometry())
         self.log_rescan_timer.stop()
         self.process_monitor_thread.stop()
@@ -720,6 +893,8 @@ Threads:           {process.num_threads}
         self.alert_thread.quit()
         self.alert_thread.wait()
         logger.info("LogWatch encerrado.")
+        if getattr(self, '_tray_available', False):
+            self.tray_icon.hide()
         event.accept()
 
 

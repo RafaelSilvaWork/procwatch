@@ -1,4 +1,4 @@
-"""Descoberta e monitoramento dos arquivos de log de um processo selecionado,
+"""Descoberta e monitoramento dos arquivos de log de processos monitorados,
 e lançamento/acompanhamento de um novo processo pelo próprio LogWatch."""
 
 import subprocess
@@ -28,30 +28,26 @@ def find_log_files(pid: int) -> List[str]:
 
 
 class LogWatchApp:
-    """Coordena o monitoramento dos arquivos de log de um processo."""
+    """Coordena o monitoramento dos arquivos de log de vários processos ao
+    mesmo tempo. Cada entrada é indexada por "{pid}:{caminho_ou_rotulo}",
+    permitindo parar o acompanhamento de um único PID sem afetar os outros
+    processos sendo monitorados simultaneamente."""
 
     def __init__(self):
         self._stop_events: Dict[str, threading.Event] = {}
         self._threads: Dict[str, threading.Thread] = {}
 
     def watch_process_logs(self, pid: int, on_line: Callable[[str, str], None]) -> List[str]:
-        """Para o monitoramento anterior e passa a monitorar os arquivos de
-        log encontrados para o PID informado. Retorna os caminhos monitorados.
-        `on_line(caminho, linha)` é chamado a cada nova linha."""
-        self.stop_all()
+        """Para o monitoramento anterior DESTE PID (não afeta outros
+        processos monitorados) e passa a monitorar os arquivos de log
+        encontrados para ele. `on_line(caminho, linha)` é chamado a cada
+        nova linha. Retorna os caminhos monitorados."""
+        self.stop_watching_pid(pid)
 
         log_files = find_log_files(pid)
         for path in log_files:
-            stop_event = threading.Event()
-            self._stop_events[path] = stop_event
-
-            thread = threading.Thread(
-                target=monitorar_arquivo,
-                args=(path, lambda linha, p=path: on_line(p, linha), stop_event),
-                daemon=True,
-            )
-            self._threads[path] = thread
-            thread.start()
+            self._start_watch(f"{pid}:{path}", monitorar_arquivo, path,
+                               lambda linha, p=path: on_line(p, linha))
 
         return log_files
 
@@ -60,34 +56,27 @@ class LogWatchApp:
         monitorá-los, sem reiniciar o tail dos que já estão sendo
         acompanhados (ao contrário de watch_process_logs). Útil para pegar
         logs criados/abertos depois da seleção inicial (ex.: rotação diária).
-        Retorna todos os caminhos atualmente monitorados para este processo."""
+        Retorna todos os caminhos atualmente monitorados para este PID."""
+        prefix = f"{pid}:"
+        already_watched = {key[len(prefix):] for key in self._stop_events if key.startswith(prefix)}
+
         for path in find_log_files(pid):
-            if path in self._stop_events:
+            if path in already_watched:
                 continue
+            self._start_watch(f"{pid}:{path}", monitorar_arquivo, path,
+                               lambda linha, p=path: on_line(p, linha))
 
-            stop_event = threading.Event()
-            self._stop_events[path] = stop_event
-
-            thread = threading.Thread(
-                target=monitorar_arquivo,
-                args=(path, lambda linha, p=path: on_line(p, linha), stop_event),
-                daemon=True,
-            )
-            self._threads[path] = thread
-            thread.start()
-
-        return list(self._stop_events.keys())
+        return [key[len(prefix):] for key in self._stop_events if key.startswith(prefix)]
 
     def launch_and_watch(
         self, path: str,
-        on_line: Callable[[str, str], None],
+        on_line: Callable[[int, str, str], None],
         on_exit: Callable[[int, int], None],
     ) -> subprocess.Popen:
         """Abre um executável e passa a acompanhar seu stdout/stderr em
-        tempo real (on_line(rótulo, linha)), notificando quando ele
-        encerrar (on_exit(pid, código_de_saída))."""
-        self.stop_all()
-
+        tempo real (on_line(pid, rótulo, linha)), notificando quando ele
+        encerrar (on_exit(pid, código_de_saída)). Não afeta o
+        acompanhamento de outros processos já sendo monitorados."""
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         proc = subprocess.Popen(
             [path],
@@ -107,25 +96,32 @@ class LogWatchApp:
         threading.Thread(target=_wait, daemon=True).start()
         return proc
 
-    def _watch_subprocess_output(self, proc: subprocess.Popen, on_line: Callable[[str, str], None]) -> None:
+    def _watch_subprocess_output(self, proc: subprocess.Popen, on_line: Callable[[int, str, str], None]) -> None:
         for label, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
             if stream is None:
                 continue
+            self._start_watch(f"{proc.pid}:{label}", monitorar_stream, stream,
+                               lambda linha, l=label, p=proc.pid: on_line(p, l, linha))
 
-            stop_event = threading.Event()
-            key = f"pid:{proc.pid}:{label}"
-            self._stop_events[key] = stop_event
+    def _start_watch(self, key: str, target, source, callback) -> None:
+        stop_event = threading.Event()
+        self._stop_events[key] = stop_event
 
-            thread = threading.Thread(
-                target=monitorar_stream,
-                args=(stream, lambda linha, l=label: on_line(l, linha), stop_event),
-                daemon=True,
-            )
-            self._threads[key] = thread
-            thread.start()
+        thread = threading.Thread(target=target, args=(source, callback, stop_event), daemon=True)
+        self._threads[key] = thread
+        thread.start()
+
+    def stop_watching_pid(self, pid: int) -> None:
+        """Para o monitoramento de logs/saída de um PID específico, sem
+        afetar o que está sendo monitorado para outros processos."""
+        prefix = f"{pid}:"
+        for key in [k for k in self._stop_events if k.startswith(prefix)]:
+            self._stop_events[key].set()
+            del self._stop_events[key]
+            self._threads.pop(key, None)
 
     def stop_all(self) -> None:
-        """Para o monitoramento de todos os arquivos ativos."""
+        """Para o monitoramento de todos os arquivos/processos ativos."""
         for stop_event in self._stop_events.values():
             stop_event.set()
         self._stop_events.clear()

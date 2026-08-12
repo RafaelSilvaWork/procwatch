@@ -80,7 +80,7 @@ class ProcessMonitorTests(unittest.TestCase):
         "Processo Selecionado" fica sem dado novo pra mostrar (bug real
         relatado: o painel travava, sem nunca mais atualizar)."""
         monitor = ProcessMonitor(max_processes=2)
-        monitor.set_pinned_pid(999)
+        monitor.pin_pid(999)
 
         class FakeProc:
             def __init__(self, pid, cpu):
@@ -100,6 +100,54 @@ class ProcessMonitorTests(unittest.TestCase):
         pids = {s.pid for s in snapshots}
         self.assertIn(999, pids, "processo fixado não pode sumir mesmo fora do TOP N por CPU")
         self.assertEqual(len(snapshots), 3)
+
+    def test_multiple_pinned_pids_all_survive_cutoff(self):
+        """Vários processos monitorados ao mesmo tempo - todos precisam
+        sobreviver ao corte do TOP N, não só um."""
+        monitor = ProcessMonitor(max_processes=1)
+        monitor.pin_pid(888)
+        monitor.pin_pid(999)
+
+        class FakeProc:
+            def __init__(self, pid, cpu):
+                self.pid = pid
+                self.info = {
+                    'pid': pid, 'name': f'proc{pid}.exe', 'cpu_percent': cpu,
+                    'memory_percent': 0.0, 'memory_info': None,
+                    'status': 'running', 'num_threads': 1,
+                }
+
+        fake_processes = [FakeProc(1, 90.0), FakeProc(888, 0.2), FakeProc(999, 0.1)]
+
+        with patch('backend.process_monitor.psutil.process_iter', return_value=fake_processes), \
+             patch('backend.process_monitor.get_pids_with_visible_window', return_value=set()):
+            snapshots = monitor._collect_all_processes()
+
+        pids = {s.pid for s in snapshots}
+        self.assertEqual(pids, {1, 888, 999})
+
+    def test_unpin_pid_allows_it_to_be_cut_again(self):
+        monitor = ProcessMonitor(max_processes=1)
+        monitor.pin_pid(999)
+        monitor.unpin_pid(999)
+
+        class FakeProc:
+            def __init__(self, pid, cpu):
+                self.pid = pid
+                self.info = {
+                    'pid': pid, 'name': f'proc{pid}.exe', 'cpu_percent': cpu,
+                    'memory_percent': 0.0, 'memory_info': None,
+                    'status': 'running', 'num_threads': 1,
+                }
+
+        fake_processes = [FakeProc(1, 90.0), FakeProc(999, 0.1)]
+
+        with patch('backend.process_monitor.psutil.process_iter', return_value=fake_processes), \
+             patch('backend.process_monitor.get_pids_with_visible_window', return_value=set()):
+            snapshots = monitor._collect_all_processes()
+
+        pids = {s.pid for s in snapshots}
+        self.assertEqual(pids, {1})
 
     def test_window_scan_is_cached_across_cycles(self):
         """Enumerar as janelas do Windows a cada coleta é desperdício - a

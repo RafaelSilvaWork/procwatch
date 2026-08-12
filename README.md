@@ -20,6 +20,16 @@ Monitor de processos, logs e alertas para Windows, com interface em PyQt6.
 - Finalização de processo diretamente pela interface.
 - Leitura do Visualizador de Eventos do Windows (Application/System).
 
+## Capturas de tela
+
+| Processos | Processo monitorado |
+|---|---|
+| ![Aba de processos, separando aplicativos de processos em segundo plano](docs/screenshots/processos.png) | ![Detalhes e histórico de CPU/memória de um processo monitorado](docs/screenshots/monitorado.png) |
+
+| Sistema | Alertas |
+|---|---|
+| ![Uso total de CPU e memória da máquina](docs/screenshots/sistema.png) | ![Alerta crítico de CPU disparado automaticamente](docs/screenshots/alertas.png) |
+
 ## Requisitos
 
 - Windows (usa `pywin32`/`win32evtlog` para o Visualizador de Eventos)

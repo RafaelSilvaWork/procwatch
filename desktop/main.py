@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QThread, QObject, QTimer, pyqtSignal, Qt
 from PyQt6.QtGui import QColor, QFont
 
-from backend.app import LogWatchApp
+from backend.app import ProcWatchApp
 from backend.logging_config import setup_logging
 from backend.models import ProcessSnapshot, AlertEvent, AlertSeverity, AlertSource, SystemStats
 from backend.process_monitor import ProcessMonitor, get_system_stats, snapshot_from_pid
@@ -109,15 +109,15 @@ class AlertWorker(QObject):
         self.engine.check_process_exit(name, pid, exit_code)
 
 
-class LogWatchMainWindow(QMainWindow):
-    """Janela principal do LogWatch - monitora múltiplos processos ao
+class ProcWatchMainWindow(QMainWindow):
+    """Janela principal do ProcWatch - monitora múltiplos processos ao
     mesmo tempo (CPU/memória/histórico/logs/alertas)."""
 
     log_line_received = pyqtSignal(int, str, str)  # (pid, caminho/rótulo, linha)
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("LogWatch v2 | Filtro de Logs por Processo")
+        self.setWindowTitle("ProcWatch | Monitor de Processos e Logs")
 
         # Monitor roda a cada 2s (menos pesado)
         self.process_monitor_thread = ProcessMonitorThread(interval=2.0, max_processes=200)
@@ -130,7 +130,7 @@ class LogWatchMainWindow(QMainWindow):
         saved_thresholds = load_thresholds()
         if saved_thresholds:
             self.alert_worker.engine.update_thresholds(saved_thresholds)
-            logger.info("Thresholds de alerta carregados de logwatch.ini: %s", saved_thresholds)
+            logger.info("Thresholds de alerta carregados de procwatch.ini: %s", saved_thresholds)
 
         saved_critical_kw, saved_warning_kw = load_custom_keywords()
         if saved_critical_kw or saved_warning_kw:
@@ -138,7 +138,7 @@ class LogWatchMainWindow(QMainWindow):
             logger.info("Palavras-chave customizadas carregadas: crit=%s aviso=%s", saved_critical_kw, saved_warning_kw)
 
         # Monitoramento dos arquivos de log/stdout dos processos monitorados
-        self.log_watch_app = LogWatchApp()
+        self.log_watch_app = ProcWatchApp()
 
         # Processos monitorados (vários ao mesmo tempo)
         self.monitored_pids: List[int] = []
@@ -476,10 +476,10 @@ class LogWatchMainWindow(QMainWindow):
 
         icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self.tray_icon = QSystemTrayIcon(icon, self)
-        self.tray_icon.setToolTip("LogWatch")
+        self.tray_icon.setToolTip("ProcWatch")
 
         tray_menu = QMenu()
-        show_action = tray_menu.addAction("Mostrar LogWatch")
+        show_action = tray_menu.addAction("Mostrar ProcWatch")
         show_action.triggered.connect(self._restore_from_tray)
         quit_action = tray_menu.addAction("Sair")
         quit_action.triggered.connect(self._quit)
@@ -725,7 +725,7 @@ Threads:           {process.num_threads}
             QMessageBox.warning(self, "Erro ao abrir", f"Não foi possível abrir o executável:\n{e}")
             return
 
-        logger.info("Processo lançado pelo LogWatch: %s (PID %s)", path, proc.pid)
+        logger.info("Processo lançado pelo ProcWatch: %s (PID %s)", path, proc.pid)
 
         snapshot = snapshot_from_pid(proc.pid)
         if snapshot is None:
@@ -749,11 +749,11 @@ Threads:           {process.num_threads}
 
     def _on_launched_process_exit(self, pid: int, code: int):
         """Chamado (em thread de fundo) quando um processo lançado pelo
-        LogWatch encerra - independentemente do que estiver ativo na tela
+        ProcWatch encerra - independentemente do que estiver ativo na tela
         no momento."""
         name = self._monitored_names.get(pid, f"PID {pid}")
 
-        self.log_line_received.emit(pid, "processo", f"[LogWatch] {name} encerrou (código de saída {code})")
+        self.log_line_received.emit(pid, "processo", f"[ProcWatch] {name} encerrou (código de saída {code})")
 
         if code == 0:
             logger.info("%s encerrou normalmente (código 0).", name)
@@ -1027,7 +1027,7 @@ Threads:           {process.num_threads}
             event.ignore()
             self.hide()
             self.tray_icon.showMessage(
-                "LogWatch",
+                "ProcWatch",
                 "Continua monitorando em segundo plano. Clique com o botão direito no ícone da bandeja para sair.",
                 QSystemTrayIcon.MessageIcon.Information,
                 4000,
@@ -1040,7 +1040,7 @@ Threads:           {process.num_threads}
         self.log_watch_app.stop_all()
         self.alert_thread.quit()
         self.alert_thread.wait()
-        logger.info("LogWatch encerrado.")
+        logger.info("ProcWatch encerrado.")
         if getattr(self, '_tray_available', False):
             self.tray_icon.hide()
         event.accept()
@@ -1048,11 +1048,11 @@ Threads:           {process.num_threads}
 
 def main() -> int:
     setup_logging()
-    logger.info("Iniciando LogWatch.")
+    logger.info("Iniciando ProcWatch.")
 
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
-    window = LogWatchMainWindow()
+    window = ProcWatchMainWindow()
     window.show()
     return app.exec()
 

@@ -1,4 +1,4 @@
-"""LogWatch Backend - Monitoramento de Processos e Alertas."""
+"""ProcWatch Backend - Monitoramento de Processos e Alertas."""
 
 from .models import (
     ProcessSnapshot,

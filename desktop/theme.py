@@ -1,4 +1,4 @@
-"""Tema visual centralizado do LogWatch (dark)."""
+"""Tema visual centralizado do ProcWatch (dark)."""
 
 COLOR_BG = "#121212"
 COLOR_PANEL_BG = "#1e1e1e"

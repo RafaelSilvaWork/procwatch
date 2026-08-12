@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from PyQt6.QtCore import QByteArray, QSettings
 
 _SETTINGS_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logwatch.ini"
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "procwatch.ini"
 )
 
 _THRESHOLD_KEYS = (

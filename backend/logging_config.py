@@ -1,11 +1,11 @@
-"""Configuração central de logging do LogWatch."""
+"""Configuração central de logging do ProcWatch."""
 
 import logging
 import logging.handlers
 import os
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
-LOG_FILE = os.path.join(LOG_DIR, "logwatch.log")
+LOG_FILE = os.path.join(LOG_DIR, "procwatch.log")
 
 _configured = False
 

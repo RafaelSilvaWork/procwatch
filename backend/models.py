@@ -1,4 +1,4 @@
-"""Modelos de dados para LogWatch."""
+"""Modelos de dados para ProcWatch."""
 
 from dataclasses import dataclass, field
 from datetime import datetime

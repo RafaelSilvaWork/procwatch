@@ -1,5 +1,5 @@
 [project]
-name = "logwatch"
+name = "procwatch"
 version = "0.1.0"
 description = "Monitor de processos, logs e alertas para Windows"
 readme = "README.md"
@@ -14,7 +14,7 @@ dependencies = [
 dev = ["pyinstaller>=6.0.0"]
 
 [project.scripts]
-logwatch = "desktop.main:main"
+procwatch = "desktop.main:main"
 
 [build-system]
 requires = ["setuptools>=68"]

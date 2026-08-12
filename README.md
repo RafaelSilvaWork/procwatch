@@ -1,4 +1,4 @@
-# LogWatch
+# ProcWatch
 
 Monitor de processos, logs e alertas para Windows, com interface em PyQt6.
 
@@ -9,7 +9,7 @@ Monitor de processos, logs e alertas para Windows, com interface em PyQt6.
   executável) e separação entre "Aplicativos" (com janela) e processos de fundo.
 - Gráfico de histórico (CPU % / Memória %) por processo monitorado.
 - Descoberta e acompanhamento em tempo real dos arquivos de log e/ou stdout/stderr
-  (para processos lançados pelo próprio LogWatch) dos processos monitorados, com logs
+  (para processos lançados pelo próprio ProcWatch) dos processos monitorados, com logs
   combinados numa única aba, prefixados por processo.
 - Motor de alertas com thresholds configuráveis (CPU/memória crítica e de aviso, CPU
   sustentada, vazamento de memória, processos zumbis) e palavras-chave de detecção de
@@ -40,8 +40,8 @@ python desktop/main.py
 ```
 
 Configurações (thresholds de alerta e geometria da janela) são salvas automaticamente
-em `logwatch.ini`, na raiz do projeto. Logs da própria aplicação (erros internos, não
-os logs monitorados) ficam em `logs/logwatch.log`, com rotação automática.
+em `procwatch.ini`, na raiz do projeto. Logs da própria aplicação (erros internos, não
+os logs monitorados) ficam em `logs/procwatch.log`, com rotação automática.
 
 ## Estrutura do projeto
 
@@ -76,5 +76,5 @@ python -m unittest discover -s tests -v
 
 ```bash
 pip install -r requirements-dev.txt
-pyinstaller --name LogWatch --onefile --noconsole desktop/main.py
+pyinstaller --name ProcWatch --onefile --noconsole desktop/main.py
 ```

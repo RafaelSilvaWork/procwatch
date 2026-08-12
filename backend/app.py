@@ -1,5 +1,5 @@
 """Descoberta e monitoramento dos arquivos de log de processos monitorados,
-e lançamento/acompanhamento de um novo processo pelo próprio LogWatch."""
+e lançamento/acompanhamento de um novo processo pelo próprio ProcWatch."""
 
 import subprocess
 import sys
@@ -27,7 +27,7 @@ def find_log_files(pid: int) -> List[str]:
     ]
 
 
-class LogWatchApp:
+class ProcWatchApp:
     """Coordena o monitoramento dos arquivos de log de vários processos ao
     mesmo tempo. Cada entrada é indexada por "{pid}:{caminho_ou_rotulo}",
     permitindo parar o acompanhamento de um único PID sem afetar os outros

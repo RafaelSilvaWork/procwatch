@@ -73,7 +73,7 @@ class AlertEngine:
         # (CRITICAL_ERROR_KEYWORDS / WARNING_ERROR_KEYWORDS).
         self._custom_critical_keywords: List[str] = []
         self._custom_warning_keywords: List[str] = []
-        # PID do próprio LogWatch - nunca alerta sobre si mesmo.
+        # PID do próprio ProcWatch - nunca alerta sobre si mesmo.
         self._self_pid = os.getpid()
         # RLock (reentrante): check_processes segura o lock e chama, na mesma
         # thread, _check_single_process -> _emit_alert, que também precisa do
@@ -139,7 +139,7 @@ class AlertEngine:
         pid = snapshot.pid
 
         if pid == self._self_pid:
-            return  # nunca alerta sobre o próprio processo do LogWatch
+            return  # nunca alerta sobre o próprio processo do ProcWatch
 
         self._process_history[pid].append(snapshot)
         if len(self._process_history[pid]) > self.HISTORY_SIZE:
@@ -338,7 +338,7 @@ class AlertEngine:
                     self._suppress_for(alert_id, 300)
 
     def check_process_exit(self, name: str, pid: int, exit_code: int) -> None:
-        """Processo lançado/monitorado pelo LogWatch encerrou. Ao contrário
+        """Processo lançado/monitorado pelo ProcWatch encerrou. Ao contrário
         de check_log_entry, é um evento estruturado (não depende de
         casamento de palavra-chave em texto livre), então continua
         alertando mesmo com as palavras-chave genéricas de aviso

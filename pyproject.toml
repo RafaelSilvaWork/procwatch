@@ -1,0 +1,24 @@
+[project]
+name = "logwatch"
+version = "0.1.0"
+description = "Monitor de processos, logs e alertas para Windows"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "psutil>=5.9.0",
+    "PyQt6>=6.6.0",
+    "pywin32>=305",
+]
+
+[project.optional-dependencies]
+dev = ["pyinstaller>=6.0.0"]
+
+[project.scripts]
+logwatch = "desktop.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["backend", "desktop"]

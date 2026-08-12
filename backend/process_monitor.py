@@ -7,6 +7,7 @@ import time
 from typing import Callable, Dict, List, Optional
 from datetime import datetime
 from .models import ProcessSnapshot
+from .window_utils import get_pids_with_visible_window
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,8 @@ class ProcessMonitor:
             )
             basic_data = basic_data[:self.max_processes]
 
+            window_pids = get_pids_with_visible_window()
+
             for pid, info in basic_data:
                 memory_info = info.get('memory_info')
                 memory_mb = memory_info.rss / (1024 * 1024) if memory_info else 0.0
@@ -134,7 +137,8 @@ class ProcessMonitor:
                     io_read_mb=0.0,
                     io_write_mb=0.0,
                     status=info.get('status') or "unknown",
-                    num_threads=info.get('num_threads') or 0
+                    num_threads=info.get('num_threads') or 0,
+                    has_window=pid in window_pids,
                 )
                 snapshots.append(snapshot)
         

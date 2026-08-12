@@ -34,7 +34,8 @@ class ProcessSnapshot:
     status: str
     timestamp: datetime = field(default_factory=datetime.now)
     num_threads: int = 0
-    
+    has_window: bool = False  # possui janela visível (é um "app aberto", não só um processo de fundo)
+
     def __post_init__(self):
         if self.cpu_percent < 0 or self.cpu_percent > 100:
             self.cpu_percent = max(0, min(100, self.cpu_percent))

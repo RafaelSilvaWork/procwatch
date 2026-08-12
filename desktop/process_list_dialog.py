@@ -6,11 +6,12 @@ import psutil
 from PyQt6.QtCore import QFileInfo, Qt, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
-    QDialog, QFileIconProvider, QHBoxLayout, QLineEdit, QPushButton,
+    QCheckBox, QDialog, QFileIconProvider, QHBoxLayout, QLineEdit, QPushButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
 from backend.models import ProcessSnapshot
+from backend.window_utils import get_pids_with_visible_window
 
 # Ícones reais de .exe são extraídos via shell do Windows e são lentos;
 # carregamos poucos por vez para não travar a UI.
@@ -41,6 +42,10 @@ class ProcessListDialog(QDialog):
         self.filter_input.setPlaceholderText("Filtrar por nome...")
         self.filter_input.textChanged.connect(self._apply_filter)
         layout.addWidget(self.filter_input)
+
+        self.apps_only_checkbox = QCheckBox("🖥️ Somente aplicativos abertos (com janela)")
+        self.apps_only_checkbox.toggled.connect(self._apply_filter)
+        layout.addWidget(self.apps_only_checkbox)
 
         self.tree_widget = QTreeWidget()
         self.tree_widget.setHeaderHidden(True)
@@ -135,9 +140,13 @@ class ProcessListDialog(QDialog):
         self._icon_cache[exe_path] = icon
         return icon
 
-    def _apply_filter(self, text: str) -> None:
+    def _matches_filter(self, process: ProcessSnapshot, text_lower: str, apps_only: bool) -> bool:
+        return text_lower in process.name.lower() and (not apps_only or process.has_window)
+
+    def _apply_filter(self, *_args) -> None:
         """Mostra/esconde itens já existentes - não recria a árvore nem refaz ícones."""
-        text_lower = text.lower()
+        text_lower = self.filter_input.text().lower()
+        apps_only = self.apps_only_checkbox.isChecked()
 
         for i in range(self.tree_widget.topLevelItemCount()):
             top = self.tree_widget.topLevelItem(i)
@@ -145,23 +154,24 @@ class ProcessListDialog(QDialog):
 
             if process is not None:
                 # processo único, sem grupo
-                top.setHidden(text_lower not in process.name.lower())
+                top.setHidden(not self._matches_filter(process, text_lower, apps_only))
                 continue
 
             any_child_visible = False
             for j in range(top.childCount()):
                 child = top.child(j)
                 child_process = child.data(0, Qt.ItemDataRole.UserRole)
-                match = text_lower in child_process.name.lower()
+                match = self._matches_filter(child_process, text_lower, apps_only)
                 child.setHidden(not match)
                 any_child_visible = any_child_visible or match
 
             top.setHidden(not any_child_visible)
-            if text_lower:
+            if text_lower or apps_only:
                 top.setExpanded(any_child_visible)
 
     def _refresh(self) -> None:
         """Faz uma nova varredura leve de processos (pid + nome) direto via psutil."""
+        window_pids = get_pids_with_visible_window()
         snapshots = []
         for proc in psutil.process_iter(['pid', 'name']):
             try:
@@ -174,13 +184,14 @@ class ProcessListDialog(QDialog):
                     io_read_mb=0.0,
                     io_write_mb=0.0,
                     status="unknown",
+                    has_window=proc.info['pid'] in window_pids,
                 ))
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
 
         self.processes = snapshots
-        self.filter_input.clear()
         self._populate(self.processes)
+        self._apply_filter()
 
     def _open(self) -> None:
         item = self.tree_widget.currentItem()

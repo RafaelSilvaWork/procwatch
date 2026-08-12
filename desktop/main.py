@@ -173,23 +173,28 @@ class LogWatchMainWindow(QMainWindow):
         # ─── TABS ───
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
-        
-        # Aba 1: Lista de Processos
+
+        # Aba 1: Aplicativos (só processos com janela visível)
+        self.tab_apps = QWidget()
+        self.setup_tab_apps()
+        self.tabs.addTab(self.tab_apps, "🖥️ Aplicativos")
+
+        # Aba 2: Todos os processos (inclui tarefas em segundo plano)
         self.tab_process_list = QWidget()
         self.setup_tab_process_list()
         self.tabs.addTab(self.tab_process_list, "📊 Todos os Processos")
-        
-        # Aba 2: Processo Selecionado
+
+        # Aba 3: Processo Selecionado
         self.tab_selected_process = QWidget()
         self.setup_tab_selected_process()
         self.tabs.addTab(self.tab_selected_process, "🎯 Processo Selecionado")
-        
-        # Aba 3: Logs Filtrados
+
+        # Aba 4: Logs Filtrados
         self.tab_filtered_logs = QWidget()
         self.setup_tab_filtered_logs()
         self.tabs.addTab(self.tab_filtered_logs, "📝 Logs do Processo")
-        
-        # Aba 4: Alertas
+
+        # Aba 5: Alertas
         self.tab_alerts = QWidget()
         self.setup_tab_alerts()
         self.tabs.addTab(self.tab_alerts, "🚨 Alertas")
@@ -197,24 +202,39 @@ class LogWatchMainWindow(QMainWindow):
         # ─── BARRA DE STATUS ───
         self.statusBar().showMessage("Iniciando monitoramento...")
 
-    def setup_tab_process_list(self):
-        """Aba com lista de TODOS os processos."""
-        layout = QVBoxLayout(self.tab_process_list)
-        
-        info = QLabel("📌 Clique em um processo abaixo para monitorar seus logs")
+    def _build_process_table(self) -> QTableWidget:
+        """Cria uma QTableWidget no formato usado pelas abas de processos."""
+        table = QTableWidget()
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels(["PID", "Nome", "CPU %", "Memória (MB)", "Memória %"])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.setSortingEnabled(True)
+        table.itemClicked.connect(self.on_process_clicked)
+        return table
+
+    def setup_tab_apps(self):
+        """Aba só com aplicativos de verdade (processos com janela visível) -
+        equivalente à aba "Apps" do Gerenciador de Tarefas do Windows."""
+        layout = QVBoxLayout(self.tab_apps)
+
+        info = QLabel("🖥️ Aplicativos com janela aberta - clique para monitorar")
         info.setStyleSheet("font-weight: bold;")
         layout.addWidget(info)
 
-        self.table_all_processes = QTableWidget()
-        self.table_all_processes.setColumnCount(5)
-        self.table_all_processes.setHorizontalHeaderLabels([
-            "PID", "Nome", "CPU %", "Memória (MB)", "Memória %"
-        ])
-        self.table_all_processes.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table_all_processes.setSortingEnabled(True)
-        self.table_all_processes.itemClicked.connect(self.on_process_clicked)
+        self.table_apps = self._build_process_table()
+        layout.addWidget(self.table_apps)
+
+    def setup_tab_process_list(self):
+        """Aba com TODOS os processos, incluindo tarefas em segundo plano."""
+        layout = QVBoxLayout(self.tab_process_list)
+
+        info = QLabel("📌 Todos os processos do sistema - clique para monitorar")
+        info.setStyleSheet("font-weight: bold;")
+        layout.addWidget(info)
+
+        self.table_all_processes = self._build_process_table()
         layout.addWidget(self.table_all_processes)
-    
+
     def setup_tab_selected_process(self):
         """Aba com informações do processo selecionado."""
         layout = QVBoxLayout(self.tab_selected_process)
@@ -301,13 +321,15 @@ class LogWatchMainWindow(QMainWindow):
         self.update_process_list()
     
     def on_process_clicked(self, item):
-        """Quando clica em um processo na tabela.
+        """Quando clica em um processo em qualquer uma das tabelas
+        (Aplicativos ou Todos os Processos).
 
         Busca o processo pelo PID guardado na célula (não pelo índice da
         linha) - a tabela pode estar ordenada por qualquer coluna (clique no
         cabeçalho), então a posição da linha não corresponde mais à ordem de
         self.displayed_processes."""
-        pid_item = self.table_all_processes.item(item.row(), 0)
+        table = item.tableWidget()
+        pid_item = table.item(item.row(), 0)
         if pid_item is None:
             return
         process = self._pid_to_process.get(pid_item.data(Qt.ItemDataRole.UserRole))
@@ -371,7 +393,7 @@ Threads:           {process.num_threads}
         self._start_process_log_watch(process)
 
         # Mudar para aba "Processo Selecionado"
-        self.tabs.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(self.tabs.indexOf(self.tab_selected_process))
 
     def open_and_monitor_process(self):
         """Abre um executável escolhido pelo usuário e passa a monitorá-lo:
@@ -413,7 +435,7 @@ Threads:           {process.num_threads}
                 f"Processo lançado e encerrado rapidamente (PID {proc.pid}) — veja o resultado na aba de Logs.",
                 5000,
             )
-            self.tabs.setCurrentIndex(2)
+            self.tabs.setCurrentIndex(self.tabs.indexOf(self.tab_filtered_logs))
             return
 
         # Ao contrário de select_process(): não chama _start_process_log_watch,
@@ -427,7 +449,7 @@ Threads:           {process.num_threads}
         )
         self.selected_process_details.setText(self._process_details_text(snapshot))
         self.selected_process_summary.setText(f"{snapshot.name} (PID {snapshot.pid})")
-        self.tabs.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(self.tabs.indexOf(self.tab_selected_process))
         self.statusBar().showMessage(f"Processo lançado: {os.path.basename(path)} (PID {proc.pid})", 5000)
 
     def _on_launched_process_exit(self, pid: int, code: int):
@@ -476,25 +498,17 @@ Threads:           {process.num_threads}
             return QColor(ALERT_COLORS["WARNING"])
         return QColor(COLOR_TEXT_BRIGHT)
 
-    def refresh_process_list(self):
-        """Atualiza a lista de processos."""
-        # Ordem de inserção (a exibida depende do que o usuário clicou no
-        # cabeçalho, já que setSortingEnabled(True) está ativo)
-        self.displayed_processes = sorted(self.all_processes, key=lambda p: p.cpu_percent, reverse=True)
-        self._pid_to_process = {p.pid: p for p in self.displayed_processes}
-        thresholds = self.alert_worker.engine.thresholds
-
-        # Atualizar tabela, reaproveitando células existentes em vez de
-        # recriá-las (evita relayout repetido com resize mode Stretch).
-        # Ordenação desligada durante o update: senão o Qt reordena linhas
-        # no meio do loop e a atualização por índice (row, col) corrompe os
-        # dados. setSortingEnabled(True) no final reaplica a ordenação que
-        # o usuário tinha escolhido (se alguma).
-        table = self.table_all_processes
+    def _populate_table(self, table: QTableWidget, processes: List[ProcessSnapshot], thresholds: dict):
+        """Preenche uma tabela de processos, reaproveitando células existentes
+        em vez de recriá-las (evita relayout repetido com resize mode Stretch).
+        Ordenação desligada durante o update: senão o Qt reordena linhas no
+        meio do loop e a atualização por índice (row, col) corrompe os dados.
+        setSortingEnabled(True) no final reaplica a ordenação que o usuário
+        tinha escolhido (se alguma)."""
         table.setUpdatesEnabled(False)
         table.setSortingEnabled(False)
-        table.setRowCount(len(self.displayed_processes))
-        for row, process in enumerate(self.displayed_processes):
+        table.setRowCount(len(processes))
+        for row, process in enumerate(processes):
             values = (
                 str(process.pid),
                 process.name,
@@ -518,12 +532,23 @@ Threads:           {process.num_threads}
         table.setSortingEnabled(True)
         table.setUpdatesEnabled(True)
 
+    def refresh_process_list(self):
+        """Atualiza as listas de processos (Aplicativos e Todos os Processos)."""
+        self.displayed_processes = sorted(self.all_processes, key=lambda p: p.cpu_percent, reverse=True)
+        self._pid_to_process = {p.pid: p for p in self.displayed_processes}
+        thresholds = self.alert_worker.engine.thresholds
+
+        apps = [p for p in self.displayed_processes if p.has_window]
+
+        self._populate_table(self.table_apps, apps, thresholds)
+        self._populate_table(self.table_all_processes, self.displayed_processes, thresholds)
+
         selected = (
             f" | Monitorando: {self.selected_process.name} (PID {self.selected_process.pid})"
             if self.selected_process else ""
         )
         self.statusBar().showMessage(
-            f"Processos: {len(self.displayed_processes)} "
+            f"Aplicativos: {len(apps)} | Processos: {len(self.displayed_processes)} "
             f"| Última atualização: {datetime.now().strftime('%H:%M:%S')}{selected}"
         )
 
@@ -540,7 +565,7 @@ Threads:           {process.num_threads}
             self.add_alert_to_display(alert)
 
         if alert.severity == AlertSeverity.CRITICAL:
-            self.tabs.setCurrentIndex(3)  # Ir para aba de alertas
+            self.tabs.setCurrentIndex(self.tabs.indexOf(self.tab_alerts))
 
     def _alert_matches_filter(self, alert: AlertEvent) -> bool:
         selected = self.severity_filter.currentText()

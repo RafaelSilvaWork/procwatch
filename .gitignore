@@ -7,6 +7,7 @@ venv/
 *.egg-info/
 build/
 dist/
+*.spec
 
 # Testes / cobertura
 .pytest_cache/

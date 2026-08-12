@@ -101,6 +101,25 @@ class ProcessMonitorTests(unittest.TestCase):
         self.assertIn(999, pids, "processo fixado não pode sumir mesmo fora do TOP N por CPU")
         self.assertEqual(len(snapshots), 3)
 
+    def test_window_scan_is_cached_across_cycles(self):
+        """Enumerar as janelas do Windows a cada coleta é desperdício - a
+        lista de janelas abertas muda bem menos que CPU/memória. Só deve
+        rodar a cada WINDOW_SCAN_EVERY_N_CYCLES coletas."""
+        monitor = ProcessMonitor(max_processes=5)
+        call_count = 0
+
+        def fake_get_pids():
+            nonlocal call_count
+            call_count += 1
+            return set()
+
+        with patch('backend.process_monitor.get_pids_with_visible_window', side_effect=fake_get_pids):
+            for _ in range(7):
+                monitor._collect_all_processes()
+
+        expected = len(range(0, 7, monitor.WINDOW_SCAN_EVERY_N_CYCLES))
+        self.assertEqual(call_count, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

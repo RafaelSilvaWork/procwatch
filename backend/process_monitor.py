@@ -4,7 +4,7 @@ import logging
 import psutil
 import threading
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Set
 from datetime import datetime
 from .models import ProcessSnapshot
 from .window_utils import get_pids_with_visible_window
@@ -49,6 +49,10 @@ class ProcessMonitor:
     # perto que MIN_COLLECT_INTERVAL, mesmo com request_refresh() em rajada.
     MIN_COLLECT_INTERVAL = 1.0
 
+    # Quais janelas estão abertas muda bem menos vezes que CPU/memória -
+    # não vale a pena enumerar todas as janelas do Windows a cada coleta.
+    WINDOW_SCAN_EVERY_N_CYCLES = 3
+
     def __init__(self, update_interval: float = 1.0, max_processes: int = 100):
         """
         Args:
@@ -64,6 +68,8 @@ class ProcessMonitor:
         self._cached_snapshots: List[ProcessSnapshot] = []
         self._wake_event = threading.Event()
         self._pinned_pid: Optional[int] = None
+        self._window_pids_cache: Set[int] = set()
+        self._collect_count = 0
 
     def request_refresh(self) -> None:
         """Interrompe a espera do loop e força uma nova coleta imediatamente."""
@@ -158,7 +164,10 @@ class ProcessMonitor:
 
             basic_data = top_data
 
-            window_pids = get_pids_with_visible_window()
+            if self._collect_count % self.WINDOW_SCAN_EVERY_N_CYCLES == 0:
+                self._window_pids_cache = get_pids_with_visible_window()
+            self._collect_count += 1
+            window_pids = self._window_pids_cache
 
             for pid, info in basic_data:
                 memory_info = info.get('memory_info')

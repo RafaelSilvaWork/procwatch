@@ -2,7 +2,7 @@ import csv
 import logging
 import sys
 import os
-import time
+import threading
 from datetime import datetime
 from typing import List, Optional
 
@@ -52,17 +52,19 @@ class ProcessMonitorThread(QThread):
     def __init__(self, interval: float = 2.0, max_processes: int = 200):
         super().__init__()
         self.monitor = ProcessMonitor(update_interval=interval, max_processes=max_processes)
-        self.running = True
-    
+        self._stop_event = threading.Event()
+
     def run(self):
         self.monitor.start(lambda snapshots: self.processes_updated.emit(snapshots))
-        
-        while self.running:
-            time.sleep(0.1)
-    
+        # O trabalho de verdade roda na thread própria do ProcessMonitor;
+        # esta thread só precisa existir até stop() ser chamado. Um Event
+        # bloqueia sem consumir CPU, ao contrário de um time.sleep(0.1) em
+        # loop (que acordava ~10x/s à toa pela vida inteira do app).
+        self._stop_event.wait()
+
     def stop(self):
-        self.running = False
         self.monitor.stop()
+        self._stop_event.set()
 
     def request_refresh(self):
         self.monitor.request_refresh()
@@ -521,19 +523,24 @@ Threads:           {process.num_threads}
                 f"{process.memory_mb:.1f}",
                 f"{process.memory_percent:.1f}",
             )
+            row_color = self._row_color(process, thresholds)
+
             for col, value in enumerate(values):
                 item = table.item(row, col)
                 if item is None:
                     item = NumericTableWidgetItem(value) if col in _NUMERIC_COLUMNS else QTableWidgetItem(value)
+                    item.setForeground(row_color)
                     table.setItem(row, col, item)
                 else:
-                    item.setText(value)
+                    # Só grava se realmente mudou - senão o Qt dispara
+                    # dataChanged/repaint à toa (comum: processo parado em
+                    # 0.0% CPU, ciclo após ciclo, sem nada de novo).
+                    if item.text() != value:
+                        item.setText(value)
+                    if item.foreground().color() != row_color:
+                        item.setForeground(row_color)
 
             table.item(row, 0).setData(Qt.ItemDataRole.UserRole, process.pid)
-
-            row_color = self._row_color(process, thresholds)
-            for col in range(len(values)):
-                table.item(row, col).setForeground(row_color)
         table.setSortingEnabled(True)
         table.setUpdatesEnabled(True)
 

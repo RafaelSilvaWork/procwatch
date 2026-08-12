@@ -11,6 +11,29 @@ from .models import ProcessSnapshot
 logger = logging.getLogger(__name__)
 
 
+def snapshot_from_pid(pid: int) -> Optional[ProcessSnapshot]:
+    """Constrói um ProcessSnapshot para um PID específico imediatamente,
+    sem esperar o próximo ciclo periódico do ProcessMonitor. Útil logo
+    após lançar um processo novo."""
+    try:
+        proc = psutil.Process(pid)
+        with proc.oneshot():
+            memory_info = proc.memory_info()
+            return ProcessSnapshot(
+                pid=pid,
+                name=proc.name(),
+                cpu_percent=proc.cpu_percent(interval=None),
+                memory_mb=memory_info.rss / (1024 * 1024),
+                memory_percent=proc.memory_percent(),
+                io_read_mb=0.0,
+                io_write_mb=0.0,
+                status=proc.status(),
+                num_threads=proc.num_threads(),
+            )
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
+
+
 class ProcessMonitor:
     """Monitor de processos com atualização a cada 1 segundo (OTIMIZADO)."""
     

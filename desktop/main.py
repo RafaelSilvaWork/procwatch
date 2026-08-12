@@ -20,7 +20,7 @@ from PyQt6.QtGui import QColor, QFont
 from backend.app import LogWatchApp
 from backend.logging_config import setup_logging
 from backend.models import ProcessSnapshot, AlertEvent, AlertSeverity, AlertSource
-from backend.process_monitor import ProcessMonitor
+from backend.process_monitor import ProcessMonitor, snapshot_from_pid
 from backend.alert_engine import AlertEngine
 from desktop.alert_settings_dialog import AlertSettingsDialog
 from desktop.app_settings import (
@@ -139,7 +139,7 @@ class LogWatchMainWindow(QMainWindow):
         # já estão sendo acompanhados.
         self.log_rescan_timer = QTimer(self)
         self.log_rescan_timer.timeout.connect(self._rescan_process_logs)
-        self.log_rescan_timer.start(10_000)
+        self.log_rescan_timer.start(5_000)
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -158,6 +158,10 @@ class LogWatchMainWindow(QMainWindow):
         select_btn = QPushButton("🎯 Selecionar Processo...")
         select_btn.clicked.connect(self.open_process_list_dialog)
         header_layout.addWidget(select_btn)
+
+        launch_btn = QPushButton("▶️ Abrir e Monitorar...")
+        launch_btn.clicked.connect(self.open_and_monitor_process)
+        header_layout.addWidget(launch_btn)
 
         refresh_btn = QPushButton("🔄 Atualizar Lista")
         refresh_btn.clicked.connect(self.request_process_refresh)
@@ -335,17 +339,9 @@ class LogWatchMainWindow(QMainWindow):
             nomes = ", ".join(os.path.basename(p) for p in log_files)
             self.filtered_logs_label.setText(f"Logs do processo (em tempo real) — {nomes}")
 
-    def select_process(self, process: ProcessSnapshot):
-        """Seleciona um processo para monitorar."""
-        self.selected_process = process
-        
-        # Atualizar label
-        self.selected_process_label.setText(
-            f"✓ Monitorando: {process.name} (PID: {process.pid})"
-        )
-        
-        # Atualizar detalhes
-        details = f"""
+    @staticmethod
+    def _process_details_text(process: ProcessSnapshot) -> str:
+        return f"""
 🔍 INFORMAÇÕES DO PROCESSO SELECIONADO
 ═══════════════════════════════════════
 
@@ -363,9 +359,12 @@ Threads:           {process.num_threads}
 
 📌 Os logs deste processo aparecerão em tempo real na aba "Logs do Processo"
 """
-        self.selected_process_details.setText(details)
 
-        # Atualizar resumo no header
+    def select_process(self, process: ProcessSnapshot):
+        """Seleciona um processo já existente para monitorar."""
+        self.selected_process = process
+        self.selected_process_label.setText(f"✓ Monitorando: {process.name} (PID: {process.pid})")
+        self.selected_process_details.setText(self._process_details_text(process))
         self.selected_process_summary.setText(f"{process.name} (PID {process.pid})")
 
         # Trocar para os arquivos de log deste processo
@@ -373,6 +372,77 @@ Threads:           {process.num_threads}
 
         # Mudar para aba "Processo Selecionado"
         self.tabs.setCurrentIndex(1)
+
+    def open_and_monitor_process(self):
+        """Abre um executável escolhido pelo usuário e passa a monitorá-lo:
+        processo, stdout/stderr em tempo real (mais confiável que achar um
+        arquivo de log logo na inicialização) e alerta se ele encerrar com
+        erro."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Abrir e Monitorar", "", "Executáveis (*.exe);;Todos os arquivos (*.*)"
+        )
+        if not path:
+            return
+
+        try:
+            proc = self.log_watch_app.launch_and_watch(
+                path,
+                lambda label, linha: self.log_line_received.emit(label, linha),
+                self._on_launched_process_exit,
+            )
+        except OSError as e:
+            QMessageBox.warning(self, "Erro ao abrir", f"Não foi possível abrir o executável:\n{e}")
+            return
+
+        logger.info("Processo lançado pelo LogWatch: %s (PID %s)", path, proc.pid)
+
+        self.filtered_logs_text.clear()
+        self.filtered_logs_label.setText(
+            f"Logs do processo (em tempo real) — stdout/stderr de {os.path.basename(path)}"
+        )
+
+        snapshot = snapshot_from_pid(proc.pid)
+        if snapshot is None:
+            # Processo já encerrou antes de conseguirmos ler seus dados
+            # (comum para executáveis muito rápidos) - a saída/código de
+            # saída ainda chegam via _on_launched_process_exit.
+            self.selected_process_label.setText(
+                f"Processo {os.path.basename(path)} (PID {proc.pid}) já encerrou antes de ser inspecionado."
+            )
+            self.statusBar().showMessage(
+                f"Processo lançado e encerrado rapidamente (PID {proc.pid}) — veja o resultado na aba de Logs.",
+                5000,
+            )
+            self.tabs.setCurrentIndex(2)
+            return
+
+        # Ao contrário de select_process(): não chama _start_process_log_watch,
+        # pois isso reiniciaria o tail (stop_all) e derrubaria o
+        # acompanhamento de stdout/stderr que acabamos de montar. O rescan
+        # periódico (_rescan_process_logs) ainda vai somar arquivos de log
+        # que esse processo abrir, sem mexer no que já está sendo lido.
+        self.selected_process = snapshot
+        self.selected_process_label.setText(
+            f"✓ Monitorando (lançado agora): {snapshot.name} (PID: {snapshot.pid})"
+        )
+        self.selected_process_details.setText(self._process_details_text(snapshot))
+        self.selected_process_summary.setText(f"{snapshot.name} (PID {snapshot.pid})")
+        self.tabs.setCurrentIndex(1)
+        self.statusBar().showMessage(f"Processo lançado: {os.path.basename(path)} (PID {proc.pid})", 5000)
+
+    def _on_launched_process_exit(self, pid: int, code: int):
+        """Chamado (em thread de fundo) quando um processo lançado pelo
+        LogWatch encerra - independentemente do que estiver selecionado
+        na tela no momento."""
+        name = self.selected_process.name if (self.selected_process and self.selected_process.pid == pid) else f"PID {pid}"
+
+        self.log_line_received.emit("processo", f"[LogWatch] {name} encerrou (código de saída {code})")
+
+        if code == 0:
+            logger.info("%s encerrou normalmente (código 0).", name)
+        else:
+            logger.warning("%s encerrou com erro (código %s).", name, code)
+            self.alert_worker.check_log(f"{name} exited with error code {code}")
 
     def _start_process_log_watch(self, process: ProcessSnapshot):
         """Descobre e passa a monitorar em tempo real os arquivos de log

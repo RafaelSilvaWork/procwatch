@@ -28,3 +28,24 @@ def monitorar_arquivo(caminho_arquivo, callback, stop_event=None):
 
             # Envia a linha lida para a função de tratamento (callback)
             callback(linha.strip())
+
+
+def monitorar_stream(stream, callback, stop_event=None):
+    """Lê linhas de um stream (stdout/stderr de um subprocesso) em tempo
+    real, até o stream fechar (processo encerrou) ou stop_event ser setado.
+
+    Ao contrário de monitorar_arquivo, não precisa de polling: readline()
+    bloqueia até chegar uma linha nova ou o pipe fechar.
+    """
+    try:
+        for linha in iter(stream.readline, ""):
+            if stop_event is not None and stop_event.is_set():
+                break
+            callback(linha.rstrip("\n"))
+    except (ValueError, OSError):
+        pass  # stream fechado enquanto líamos (processo encerrado abruptamente)
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass

@@ -1,11 +1,14 @@
-"""Descoberta e monitoramento dos arquivos de log de um processo selecionado."""
+"""Descoberta e monitoramento dos arquivos de log de um processo selecionado,
+e lançamento/acompanhamento de um novo processo pelo próprio LogWatch."""
 
+import subprocess
+import sys
 import threading
 from typing import Callable, Dict, List
 
 import psutil
 
-from .file_tail import monitorar_arquivo
+from .file_tail import monitorar_arquivo, monitorar_stream
 from .os_logs import buscar_logs_sistema
 
 LOG_EXTENSIONS = (".log", ".txt", ".out", ".err")
@@ -74,6 +77,52 @@ class LogWatchApp:
             thread.start()
 
         return list(self._stop_events.keys())
+
+    def launch_and_watch(
+        self, path: str,
+        on_line: Callable[[str, str], None],
+        on_exit: Callable[[int, int], None],
+    ) -> subprocess.Popen:
+        """Abre um executável e passa a acompanhar seu stdout/stderr em
+        tempo real (on_line(rótulo, linha)), notificando quando ele
+        encerrar (on_exit(pid, código_de_saída))."""
+        self.stop_all()
+
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        proc = subprocess.Popen(
+            [path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            creationflags=creationflags,
+        )
+
+        self._watch_subprocess_output(proc, on_line)
+
+        def _wait():
+            code = proc.wait()
+            on_exit(proc.pid, code)
+
+        threading.Thread(target=_wait, daemon=True).start()
+        return proc
+
+    def _watch_subprocess_output(self, proc: subprocess.Popen, on_line: Callable[[str, str], None]) -> None:
+        for label, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+            if stream is None:
+                continue
+
+            stop_event = threading.Event()
+            key = f"pid:{proc.pid}:{label}"
+            self._stop_events[key] = stop_event
+
+            thread = threading.Thread(
+                target=monitorar_stream,
+                args=(stream, lambda linha, l=label: on_line(l, linha), stop_event),
+                daemon=True,
+            )
+            self._threads[key] = thread
+            thread.start()
 
     def stop_all(self) -> None:
         """Para o monitoramento de todos os arquivos ativos."""

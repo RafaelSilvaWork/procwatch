@@ -80,3 +80,17 @@ def save_window_geometry(geometry: QByteArray) -> None:
 
 def load_window_geometry() -> Optional[QByteArray]:
     return _settings().value("window/geometry")
+
+
+def save_tray_notice_dismissed(dismissed: bool) -> None:
+    """Se o usuário marcou "não mostrar novamente" no aviso explicando que
+    fechar a janela minimiza para a bandeja em vez de encerrar."""
+    _settings().setValue("ui/tray_notice_dismissed", dismissed)
+
+
+def load_tray_notice_dismissed() -> bool:
+    value = _settings().value("ui/tray_notice_dismissed", False)
+    # QSettings (.ini) pode devolver "true"/"false" como string
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return bool(value)

@@ -14,7 +14,8 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QTextEdit, QPushButton, QLabel, QTableWidget, QTableWidgetItem,
     QHeaderView, QComboBox, QSpinBox, QDialog, QFileDialog, QMessageBox,
-    QListWidget, QListWidgetItem, QSystemTrayIcon, QMenu, QStyle, QLineEdit
+    QListWidget, QListWidgetItem, QSystemTrayIcon, QMenu, QStyle, QLineEdit,
+    QButtonGroup, QCheckBox
 )
 from PyQt6.QtCore import QThread, QObject, QTimer, pyqtSignal, Qt
 from PyQt6.QtGui import QColor, QFont
@@ -26,8 +27,8 @@ from backend.process_monitor import ProcessMonitor, get_system_stats, snapshot_f
 from backend.alert_engine import AlertEngine
 from desktop.alert_settings_dialog import AlertSettingsDialog
 from desktop.app_settings import (
-    load_custom_keywords, load_thresholds, load_window_geometry,
-    save_custom_keywords, save_thresholds, save_window_geometry,
+    load_custom_keywords, load_thresholds, load_tray_notice_dismissed, load_window_geometry,
+    save_custom_keywords, save_thresholds, save_tray_notice_dismissed, save_window_geometry,
 )
 from desktop.history_chart import HistoryChartWidget
 from desktop.process_list_dialog import ProcessListDialog
@@ -37,6 +38,16 @@ logger = logging.getLogger(__name__)
 
 _NUMERIC_COLUMNS = {0, 2, 3, 4}  # PID, CPU %, Memória (MB), Memória %
 _HISTORY_MAX_POINTS = 150
+
+# Paleta de identificação de processo no log combinado - reaproveita tokens
+# já existentes (nenhuma cor nova). Usada só como identificador visual por
+# processo (rotação por ordem de adição), não como indicador de severidade -
+# é o mesmo padrão de "uma cor por stream" usado por viewers de log
+# multi-fonte (ex.: docker compose logs).
+_LOG_PREFIX_PALETTE = [
+    COLOR_TEXT_BRIGHT, COLOR_ACCENT, ALERT_COLORS["INFO"],
+    ALERT_COLORS["ERROR"], ALERT_COLORS["CRITICAL"],
+]
 
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -146,6 +157,7 @@ class ProcWatchMainWindow(QMainWindow):
         self.active_process: Optional[ProcessSnapshot] = None
         self.process_history: Dict[int, Deque[Tuple[float, float]]] = {}
         self._monitored_names: Dict[int, str] = {}
+        self._pid_log_colors: Dict[int, str] = {}
 
         self.all_processes: List[ProcessSnapshot] = []
         self.displayed_processes: List[ProcessSnapshot] = []
@@ -239,6 +251,10 @@ class ProcWatchMainWindow(QMainWindow):
         self.monitored_summary_label.setStyleSheet(f"color: {COLOR_ACCENT}; font-weight: bold;")
         header_layout.addWidget(self.monitored_summary_label)
 
+        # Ações primárias (escolher o que monitorar) agrupadas à esquerda;
+        # espaçamento extra separa da ação utilitária (atualizar), que não
+        # tem o mesmo peso de decisão - evita que as três leiam como um
+        # bloco único de importância igual.
         select_btn = QPushButton("🎯 Selecionar Processo...")
         select_btn.clicked.connect(self.open_process_list_dialog)
         header_layout.addWidget(select_btn)
@@ -246,6 +262,8 @@ class ProcWatchMainWindow(QMainWindow):
         launch_btn = QPushButton("▶️ Abrir e Monitorar...")
         launch_btn.clicked.connect(self.open_and_monitor_process)
         header_layout.addWidget(launch_btn)
+
+        header_layout.addSpacing(24)
 
         refresh_btn = QPushButton("🔄 Atualizar Lista")
         refresh_btn.clicked.connect(self.request_process_refresh)
@@ -255,38 +273,37 @@ class ProcWatchMainWindow(QMainWindow):
         main_layout.addLayout(header_layout)
 
         # ─── TABS ───
+        # Ordem por frequência real de uso (não alfabética nem de
+        # implementação): escolher processo -> acompanhar -> ler log ->
+        # reagir a alerta. "Sistema" é visão passiva, fica por último.
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
 
-        # Aba 0: Visão geral do sistema (CPU/memória totais da máquina)
-        self.tab_system = QWidget()
-        self.setup_tab_system()
-        self.tabs.addTab(self.tab_system, "💻 Sistema")
+        # Aba 0: Processos (Aplicativos/Todos combinados com um alternador,
+        # em vez de duas abas para a mesma tabela com um filtro diferente)
+        self.tab_processes = QWidget()
+        self.setup_tab_processes()
+        self.tabs.addTab(self.tab_processes, "📊 Processos")
 
-        # Aba 1: Aplicativos (só processos com janela visível)
-        self.tab_apps = QWidget()
-        self.setup_tab_apps()
-        self.tabs.addTab(self.tab_apps, "🖥️ Aplicativos")
-
-        # Aba 2: Todos os processos (inclui tarefas em segundo plano)
-        self.tab_process_list = QWidget()
-        self.setup_tab_process_list()
-        self.tabs.addTab(self.tab_process_list, "📊 Todos os Processos")
-
-        # Aba 3: Processos monitorados
+        # Aba 1: Processos monitorados
         self.tab_selected_process = QWidget()
         self.setup_tab_selected_process()
-        self.tabs.addTab(self.tab_selected_process, "🎯 Processos Monitorados")
+        self.tabs.addTab(self.tab_selected_process, "🎯 Monitorados")
 
-        # Aba 4: Logs
+        # Aba 2: Logs
         self.tab_filtered_logs = QWidget()
         self.setup_tab_filtered_logs()
         self.tabs.addTab(self.tab_filtered_logs, "📝 Logs")
 
-        # Aba 5: Alertas
+        # Aba 3: Alertas
         self.tab_alerts = QWidget()
         self.setup_tab_alerts()
         self.tabs.addTab(self.tab_alerts, "🚨 Alertas")
+
+        # Aba 4: Visão geral do sistema (CPU/memória totais da máquina)
+        self.tab_system = QWidget()
+        self.setup_tab_system()
+        self.tabs.addTab(self.tab_system, "💻 Sistema")
 
         # ─── BARRA DE STATUS ───
         self.statusBar().showMessage("Iniciando monitoramento...")
@@ -331,32 +348,58 @@ class ProcWatchMainWindow(QMainWindow):
         filter_input.textChanged.connect(lambda text, t=table: self._apply_table_filter(t, text))
         return filter_input
 
-    def setup_tab_apps(self):
-        """Aba só com aplicativos de verdade (processos com janela visível) -
-        equivalente à aba "Apps" do Gerenciador de Tarefas do Windows."""
-        layout = QVBoxLayout(self.tab_apps)
+    def setup_tab_processes(self):
+        """Aba única de processos, com alternador "Aplicativos / Todos" em
+        vez de duas abas separadas para a mesma tabela com um filtro
+        diferente - a distinção de escopo vira uma escolha dentro do
+        contexto, não uma decisão de navegação (Lei de Hick)."""
+        layout = QVBoxLayout(self.tab_processes)
 
-        info = QLabel("🖥️ Aplicativos com janela aberta - clique para monitorar")
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(QLabel("Mostrar:"))
+
+        self.scope_apps_btn = QPushButton("🖥️ Aplicativos")
+        self.scope_apps_btn.setCheckable(True)
+        self.scope_apps_btn.setChecked(True)
+        self.scope_apps_btn.setToolTip("Só processos com janela visível")
+
+        self.scope_all_btn = QPushButton("📌 Todos")
+        self.scope_all_btn.setCheckable(True)
+        self.scope_all_btn.setToolTip("Todos os processos, incluindo tarefas em segundo plano")
+
+        # Reaproveita a cor de destaque já existente para marcar qual dos
+        # dois está ativo - sem essa regra, um QPushButton "checked" não
+        # tem nenhuma distinção visual no tema atual.
+        segmented_style = f"""
+            QPushButton:checkable {{ background-color: #2a2a2a; }}
+            QPushButton:checkable:checked {{
+                background-color: #333333;
+                border: 1px solid {COLOR_ACCENT};
+                color: {COLOR_ACCENT};
+            }}
+        """
+        self.scope_apps_btn.setStyleSheet(segmented_style)
+        self.scope_all_btn.setStyleSheet(segmented_style)
+
+        self.process_scope_group = QButtonGroup(self)
+        self.process_scope_group.setExclusive(True)
+        self.process_scope_group.addButton(self.scope_apps_btn)
+        self.process_scope_group.addButton(self.scope_all_btn)
+        self.process_scope_group.buttonClicked.connect(lambda _btn: self.refresh_process_list())
+
+        scope_row.addWidget(self.scope_apps_btn)
+        scope_row.addWidget(self.scope_all_btn)
+        scope_row.addStretch()
+        layout.addLayout(scope_row)
+
+        info = QLabel("Clique num processo para monitorá-lo")
         info.setStyleSheet("font-weight: bold;")
         layout.addWidget(info)
 
-        self.table_apps = self._build_process_table()
-        self.apps_filter_input = self._build_filter_input(self.table_apps)
-        layout.addWidget(self.apps_filter_input)
-        layout.addWidget(self.table_apps)
-
-    def setup_tab_process_list(self):
-        """Aba com TODOS os processos, incluindo tarefas em segundo plano."""
-        layout = QVBoxLayout(self.tab_process_list)
-
-        info = QLabel("📌 Todos os processos do sistema - clique para monitorar")
-        info.setStyleSheet("font-weight: bold;")
-        layout.addWidget(info)
-
-        self.table_all_processes = self._build_process_table()
-        self.all_processes_filter_input = self._build_filter_input(self.table_all_processes)
-        layout.addWidget(self.all_processes_filter_input)
-        layout.addWidget(self.table_all_processes)
+        self.table_processes = self._build_process_table()
+        self.processes_filter_input = self._build_filter_input(self.table_processes)
+        layout.addWidget(self.processes_filter_input)
+        layout.addWidget(self.table_processes)
 
     def setup_tab_selected_process(self):
         """Aba com a lista de processos monitorados simultaneamente e os
@@ -373,11 +416,26 @@ class ProcWatchMainWindow(QMainWindow):
         list_layout.addWidget(QLabel("Processos monitorados:"))
         self.monitored_list_widget = QListWidget()
         self.monitored_list_widget.currentItemChanged.connect(self._on_monitored_selection_changed)
+        # Affordance explícita: sem isso, nada sinaliza que clicar num item
+        # troca o painel de detalhes e o gráfico à direita. Borda de
+        # destaque reaproveita COLOR_ACCENT (já existente); os cinzas são
+        # os mesmos já usados no hover padrão de QPushButton do tema.
+        self.monitored_list_widget.setStyleSheet(f"""
+            QListWidget::item {{ padding: 6px; border: 1px solid transparent; }}
+            QListWidget::item:hover {{ background-color: #333333; }}
+            QListWidget::item:selected {{
+                background-color: #333333;
+                border: 2px solid {COLOR_ACCENT};
+            }}
+        """)
+        self.monitored_list_widget.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.monitored_list_widget.setToolTip("Clique para ver os detalhes deste processo")
         list_layout.addWidget(self.monitored_list_widget)
 
-        stop_monitor_btn = QPushButton("🚫 Parar de Monitorar")
-        stop_monitor_btn.clicked.connect(self.stop_monitoring_active_process)
-        list_layout.addWidget(stop_monitor_btn)
+        self.stop_monitor_btn = QPushButton("🚫 Parar de Monitorar")
+        self.stop_monitor_btn.clicked.connect(self.stop_monitoring_active_process)
+        self.stop_monitor_btn.setEnabled(False)
+        list_layout.addWidget(self.stop_monitor_btn)
 
         split_layout.addWidget(list_widget_container)
 
@@ -386,9 +444,15 @@ class ProcWatchMainWindow(QMainWindow):
         details_layout = QVBoxLayout(details_container)
         details_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.selected_process_label = QLabel("Nenhum processo monitorado")
+        self.selected_process_label = QLabel("Nenhum processo monitorado ainda")
         self.selected_process_label.setStyleSheet(f"color: {COLOR_ACCENT}; font-size: 14pt; font-weight: bold;")
         details_layout.addWidget(self.selected_process_label)
+
+        # Estado vazio como convite à ação, não um beco sem saída - some
+        # assim que o primeiro processo é monitorado.
+        self.empty_state_hint_btn = QPushButton("🎯 Selecionar Processo...")
+        self.empty_state_hint_btn.clicked.connect(self.open_process_list_dialog)
+        details_layout.addWidget(self.empty_state_hint_btn)
 
         self.selected_process_details = QTextEdit()
         self.selected_process_details.setReadOnly(True)
@@ -399,9 +463,10 @@ class ProcWatchMainWindow(QMainWindow):
         self.history_chart = HistoryChartWidget(max_points=_HISTORY_MAX_POINTS)
         details_layout.addWidget(self.history_chart)
 
-        terminate_btn = QPushButton("🛑 Finalizar Processo")
-        terminate_btn.clicked.connect(self.terminate_active_process)
-        details_layout.addWidget(terminate_btn)
+        self.terminate_btn = QPushButton("🛑 Finalizar Processo")
+        self.terminate_btn.clicked.connect(self.terminate_active_process)
+        self.terminate_btn.setEnabled(False)
+        details_layout.addWidget(self.terminate_btn)
 
         split_layout.addWidget(details_container)
         outer_layout.addLayout(split_layout)
@@ -612,6 +677,7 @@ Threads:           {process.num_threads}
             self.process_monitor_thread.pin_pid(pid)
             self.process_history[pid] = deque(maxlen=_HISTORY_MAX_POINTS)
             self._monitored_names[pid] = process.name
+            self._assign_log_color(pid)
 
             item = QListWidgetItem(f"{process.name} (PID {pid})")
             item.setData(Qt.ItemDataRole.UserRole, pid)
@@ -631,6 +697,9 @@ Threads:           {process.num_threads}
         no gráfico de histórico (todos continuam sendo monitorados)."""
         self.active_pid = pid
         self.active_process = process or self._pid_to_process.get(pid)
+        self.terminate_btn.setEnabled(True)
+        self.stop_monitor_btn.setEnabled(True)
+        self.empty_state_hint_btn.hide()
         if self.active_process is not None:
             self.selected_process_label.setText(
                 f"✓ Monitorando: {self.active_process.name} (PID: {self.active_process.pid})"
@@ -669,6 +738,7 @@ Threads:           {process.num_threads}
         self.log_watch_app.stop_watching_pid(pid)
         self.process_history.pop(pid, None)
         self._monitored_names.pop(pid, None)
+        self._pid_log_colors.pop(pid, None)
 
         for i in range(self.monitored_list_widget.count()):
             item = self.monitored_list_widget.item(i)
@@ -683,12 +753,24 @@ Threads:           {process.num_threads}
             else:
                 self.active_pid = None
                 self.active_process = None
-                self.selected_process_label.setText("Nenhum processo monitorado")
+                self.terminate_btn.setEnabled(False)
+                self.stop_monitor_btn.setEnabled(False)
+                self.empty_state_hint_btn.show()
+                self.selected_process_label.setText("Nenhum processo monitorado ainda")
                 self.selected_process_details.clear()
                 self.history_chart.clear_history()
 
         self._update_monitored_summary()
         self._update_logs_tab_label()
+
+    def _assign_log_color(self, pid: int) -> str:
+        """Atribui uma cor de identificação (rotação por ordem de adição)
+        a um processo monitorado, usada só para agrupar visualmente suas
+        linhas no log combinado - não indica severidade."""
+        if pid not in self._pid_log_colors:
+            idx = len(self._pid_log_colors) % len(_LOG_PREFIX_PALETTE)
+            self._pid_log_colors[pid] = _LOG_PREFIX_PALETTE[idx]
+        return self._pid_log_colors[pid]
 
     def _update_monitored_summary(self):
         if not self.monitored_pids:
@@ -773,10 +855,21 @@ Threads:           {process.num_threads}
             logger.info("Nenhum arquivo de log encontrado para %s (PID %s).", process.name, process.pid)
 
     def _append_filtered_log(self, pid: int, path: str, linha: str):
-        """Recebe uma nova linha de log (já marshalled para a thread da UI)."""
+        """Recebe uma nova linha de log (já marshalled para a thread da UI).
+
+        O prefixo é colorido por processo (agrupamento visual pré-atento -
+        princípio de similaridade de Gestalt) pra separar rapidamente
+        quem escreveu o quê quando vários processos estão monitorados ao
+        mesmo tempo, sem precisar ler o texto inteiro de cada linha."""
         nome = self._monitored_names.get(pid, f"PID {pid}")
         origem = os.path.basename(path)
-        self.filtered_logs_text.append(f"[{nome} | {origem}] {linha}")
+        color = self._pid_log_colors.get(pid, COLOR_ACCENT)
+
+        linha_escapada = (
+            linha.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        )
+        prefixo = f'<span style="color:{color}; font-weight:bold;">[{nome} | {origem}]</span>'
+        self.filtered_logs_text.insertHtml(f"{prefixo} {linha_escapada}<br>")
 
     def _row_color(self, process: ProcessSnapshot, thresholds: dict) -> QColor:
         if process.is_suspicious_path:
@@ -863,15 +956,16 @@ Threads:           {process.num_threads}
                 self.history_chart.add_point(fresh.cpu_percent, fresh.memory_percent)
 
     def refresh_process_list(self):
-        """Atualiza as listas de processos (Aplicativos e Todos os Processos)."""
+        """Atualiza a tabela de processos (escopo Aplicativos/Todos definido
+        pelo alternador) e o painel de monitorados."""
         self.displayed_processes = sorted(self.all_processes, key=lambda p: p.cpu_percent, reverse=True)
         self._pid_to_process = {p.pid: p for p in self.displayed_processes}
         thresholds = self.alert_worker.engine.thresholds
 
         apps = [p for p in self.displayed_processes if p.has_window]
+        scoped = apps if self.scope_apps_btn.isChecked() else self.displayed_processes
 
-        self._populate_table(self.table_apps, apps, thresholds)
-        self._populate_table(self.table_all_processes, self.displayed_processes, thresholds)
+        self._populate_table(self.table_processes, scoped, thresholds)
         self._refresh_monitored_processes_display()
 
         self.statusBar().showMessage(
@@ -1019,19 +1113,43 @@ Threads:           {process.num_threads}
         self._stop_monitoring_pid(pid)
         self.statusBar().showMessage(f"Processo {name} (PID {pid}) finalizado.", 5000)
 
+    def _show_tray_first_close_dialog(self):
+        """Explica, de forma que fique registrada (modal, não um toast que
+        some em 4s), que fechar a janela minimiza pro segundo plano em vez
+        de encerrar - uma mudança real de modelo mental que merece uma
+        decisão consciente do usuário, não uma notificação perecível
+        (heurística de Nielsen: controle e liberdade do usuário)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("ProcWatch continua rodando")
+        box.setText(
+            "Fechar esta janela não encerra o ProcWatch — ele continua monitorando em "
+            "segundo plano, acessível pelo ícone na bandeja do sistema.\n\n"
+            "Para encerrar de verdade, clique com o botão direito no ícone da bandeja "
+            "e escolha \"Sair\"."
+        )
+        dont_ask_checkbox = QCheckBox("Não mostrar esta mensagem novamente")
+        box.setCheckBox(dont_ask_checkbox)
+        box.exec()
+        if dont_ask_checkbox.isChecked():
+            save_tray_notice_dismissed(True)
+
     def closeEvent(self, event):
         """Ao fechar a janela: minimiza para a bandeja (se disponível) em
         vez de encerrar, para o monitoramento continuar em segundo plano.
         Só encerra de verdade via menu da bandeja ("Sair")."""
         if getattr(self, '_tray_available', False) and not self._closing:
             event.ignore()
+            if not load_tray_notice_dismissed():
+                self._show_tray_first_close_dialog()
+            else:
+                self.tray_icon.showMessage(
+                    "ProcWatch",
+                    "Continua monitorando em segundo plano. Clique com o botão direito no ícone da bandeja para sair.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    4000,
+                )
             self.hide()
-            self.tray_icon.showMessage(
-                "ProcWatch",
-                "Continua monitorando em segundo plano. Clique com o botão direito no ícone da bandeja para sair.",
-                QSystemTrayIcon.MessageIcon.Information,
-                4000,
-            )
             return
 
         save_window_geometry(self.saveGeometry())

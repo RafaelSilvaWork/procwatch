@@ -14,7 +14,7 @@ dist/
 htmlcov/
 
 # Configuração e logs locais (gerados em tempo de execução, não versionados)
-logwatch.ini
+*.ini
 logs/
 
 # Exportações do próprio app (alertas/logs exportados pelo usuário)

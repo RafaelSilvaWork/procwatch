@@ -74,6 +74,33 @@ class ProcessMonitorTests(unittest.TestCase):
         for gap in gaps:
             self.assertGreaterEqual(gap, monitor.MIN_COLLECT_INTERVAL - 0.05)
 
+    def test_pinned_pid_survives_top_n_cutoff(self):
+        """Um processo "fixado" (o selecionado pelo usuário) não pode sumir
+        da coleta só porque a CPU dele caiu no ranking - senão o painel
+        "Processo Selecionado" fica sem dado novo pra mostrar (bug real
+        relatado: o painel travava, sem nunca mais atualizar)."""
+        monitor = ProcessMonitor(max_processes=2)
+        monitor.set_pinned_pid(999)
+
+        class FakeProc:
+            def __init__(self, pid, cpu):
+                self.pid = pid
+                self.info = {
+                    'pid': pid, 'name': f'proc{pid}.exe', 'cpu_percent': cpu,
+                    'memory_percent': 0.0, 'memory_info': None,
+                    'status': 'running', 'num_threads': 1,
+                }
+
+        fake_processes = [FakeProc(1, 90.0), FakeProc(2, 80.0), FakeProc(999, 0.1)]
+
+        with patch('backend.process_monitor.psutil.process_iter', return_value=fake_processes), \
+             patch('backend.process_monitor.get_pids_with_visible_window', return_value=set()):
+            snapshots = monitor._collect_all_processes()
+
+        pids = {s.pid for s in snapshots}
+        self.assertIn(999, pids, "processo fixado não pode sumir mesmo fora do TOP N por CPU")
+        self.assertEqual(len(snapshots), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

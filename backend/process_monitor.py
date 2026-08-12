@@ -63,10 +63,19 @@ class ProcessMonitor:
         self._lock = threading.Lock()
         self._cached_snapshots: List[ProcessSnapshot] = []
         self._wake_event = threading.Event()
+        self._pinned_pid: Optional[int] = None
 
     def request_refresh(self) -> None:
         """Interrompe a espera do loop e força uma nova coleta imediatamente."""
         self._wake_event.set()
+
+    def set_pinned_pid(self, pid: Optional[int]) -> None:
+        """Garante que este PID nunca seja cortado do corte TOP N por CPU -
+        para o processo que o usuário selecionou explicitamente não sumir
+        silenciosamente da coleta se a CPU dele cair (e outros 200+
+        processos tiverem CPU maior naquele instante)."""
+        with self._lock:
+            self._pinned_pid = pid
 
     def start(self, on_update: Callable[[List[ProcessSnapshot]], None]) -> None:
         if self._running:
@@ -137,7 +146,17 @@ class ProcessMonitor:
                 key=lambda x: x[1].get('cpu_percent') or 0.0,
                 reverse=True
             )
-            basic_data = basic_data[:self.max_processes]
+            top_data = basic_data[:self.max_processes]
+
+            with self._lock:
+                pinned_pid = self._pinned_pid
+
+            if pinned_pid is not None and not any(pid == pinned_pid for pid, _ in top_data):
+                pinned_entry = next((entry for entry in basic_data if entry[0] == pinned_pid), None)
+                if pinned_entry is not None:
+                    top_data = top_data + [pinned_entry]
+
+            basic_data = top_data
 
             window_pids = get_pids_with_visible_window()
 

@@ -67,6 +67,9 @@ class ProcessMonitorThread(QThread):
     def request_refresh(self):
         self.monitor.request_refresh()
 
+    def set_pinned_pid(self, pid: Optional[int]):
+        self.monitor.set_pinned_pid(pid)
+
 
 class AlertWorker(QObject):
     """Roda o engine de alertas. Vive em sua própria thread via moveToThread,
@@ -385,6 +388,7 @@ Threads:           {process.num_threads}
     def select_process(self, process: ProcessSnapshot):
         """Seleciona um processo já existente para monitorar."""
         self.selected_process = process
+        self.process_monitor_thread.set_pinned_pid(process.pid)
         self.selected_process_label.setText(f"✓ Monitorando: {process.name} (PID: {process.pid})")
         self.selected_process_details.setText(self._process_details_text(process))
         self.selected_process_summary.setText(f"{process.name} (PID {process.pid})")
@@ -444,6 +448,7 @@ Threads:           {process.num_threads}
         # periódico (_rescan_process_logs) ainda vai somar arquivos de log
         # que esse processo abrir, sem mexer no que já está sendo lido.
         self.selected_process = snapshot
+        self.process_monitor_thread.set_pinned_pid(snapshot.pid)
         self.selected_process_label.setText(
             f"✓ Monitorando (lançado agora): {snapshot.name} (PID: {snapshot.pid})"
         )
@@ -532,6 +537,22 @@ Threads:           {process.num_threads}
         table.setSortingEnabled(True)
         table.setUpdatesEnabled(True)
 
+    def _refresh_selected_process_display(self):
+        """Atualiza o painel "Processo Selecionado" (CPU/memória/etc.) com o
+        snapshot mais recente. Sem isso, o painel fica congelado com os
+        dados do instante da seleção para sempre, mesmo com o monitor
+        continuando a rodar normalmente."""
+        if self.selected_process is None:
+            return
+
+        fresh = self._pid_to_process.get(self.selected_process.pid)
+        if fresh is None:
+            return  # processo não apareceu neste ciclo (ex.: acabou de encerrar)
+
+        self.selected_process = fresh
+        self.selected_process_label.setText(f"✓ Monitorando: {fresh.name} (PID: {fresh.pid})")
+        self.selected_process_details.setText(self._process_details_text(fresh))
+
     def refresh_process_list(self):
         """Atualiza as listas de processos (Aplicativos e Todos os Processos)."""
         self.displayed_processes = sorted(self.all_processes, key=lambda p: p.cpu_percent, reverse=True)
@@ -542,6 +563,7 @@ Threads:           {process.num_threads}
 
         self._populate_table(self.table_apps, apps, thresholds)
         self._populate_table(self.table_all_processes, self.displayed_processes, thresholds)
+        self._refresh_selected_process_display()
 
         selected = (
             f" | Monitorando: {self.selected_process.name} (PID {self.selected_process.pid})"
@@ -676,6 +698,7 @@ Threads:           {process.num_threads}
 
         logger.info("Processo %s (PID %s) finalizado pelo usuário.", name, pid)
         self.log_watch_app.stop_all()
+        self.process_monitor_thread.set_pinned_pid(None)
         self.selected_process_label.setText(f"Processo {name} (PID {pid}) finalizado.")
         self.selected_process_summary.setText("Nenhum")
         self.selected_process = None

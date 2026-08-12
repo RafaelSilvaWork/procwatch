@@ -30,6 +30,11 @@ Monitor de processos, logs e alertas para Windows, com interface em PyQt6.
 |---|---|
 | ![Uso total de CPU e memória da máquina](docs/screenshots/sistema.png) | ![Alerta crítico de CPU disparado automaticamente](docs/screenshots/alertas.png) |
 
+## Download
+
+Não quer rodar do código-fonte? Baixe o executável pronto (Windows, não precisa de
+Python instalado) na [página de releases](https://github.com/RafaelSilvaWork/procwatch/releases/latest).
+
 ## Requisitos
 
 - Windows (usa `pywin32`/`win32evtlog` para o Visualizador de Eventos)

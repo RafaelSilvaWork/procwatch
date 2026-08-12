@@ -21,8 +21,8 @@ from PyQt6.QtGui import QColor, QFont
 
 from backend.app import LogWatchApp
 from backend.logging_config import setup_logging
-from backend.models import ProcessSnapshot, AlertEvent, AlertSeverity, AlertSource
-from backend.process_monitor import ProcessMonitor, snapshot_from_pid
+from backend.models import ProcessSnapshot, AlertEvent, AlertSeverity, AlertSource, SystemStats
+from backend.process_monitor import ProcessMonitor, get_system_stats, snapshot_from_pid
 from backend.alert_engine import AlertEngine
 from desktop.alert_settings_dialog import AlertSettingsDialog
 from desktop.app_settings import (
@@ -53,14 +53,22 @@ class NumericTableWidgetItem(QTableWidgetItem):
 class ProcessMonitorThread(QThread):
     """Thread para listar processos disponíveis."""
     processes_updated = pyqtSignal(list)
+    system_stats_updated = pyqtSignal(object)  # SystemStats
 
     def __init__(self, interval: float = 2.0, max_processes: int = 200):
         super().__init__()
         self.monitor = ProcessMonitor(update_interval=interval, max_processes=max_processes)
         self._stop_event = threading.Event()
 
+    def _on_snapshots(self, snapshots):
+        self.processes_updated.emit(snapshots)
+        try:
+            self.system_stats_updated.emit(get_system_stats())
+        except Exception:
+            logger.exception("Erro ao coletar estatísticas do sistema")
+
     def run(self):
-        self.monitor.start(lambda snapshots: self.processes_updated.emit(snapshots))
+        self.monitor.start(self._on_snapshots)
         # O trabalho de verdade roda na thread própria do ProcessMonitor;
         # esta thread só precisa existir até stop() ser chamado. Um Event
         # bloqueia sem consumir CPU, ao contrário de um time.sleep(0.1) em
@@ -154,6 +162,7 @@ class LogWatchMainWindow(QMainWindow):
         # Entrega os snapshots direto para a thread do worker (conexão em fila,
         # já que o worker mora em outra thread) - não passa pela UI.
         self.process_monitor_thread.processes_updated.connect(self.alert_worker.check_processes)
+        self.process_monitor_thread.system_stats_updated.connect(self.on_system_stats_updated)
         self.alert_worker.alert_triggered.connect(self.on_alert_triggered)
         self.log_line_received.connect(self._append_filtered_log)
 
@@ -200,6 +209,11 @@ class LogWatchMainWindow(QMainWindow):
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
 
+        # Aba 0: Visão geral do sistema (CPU/memória totais da máquina)
+        self.tab_system = QWidget()
+        self.setup_tab_system()
+        self.tabs.addTab(self.tab_system, "💻 Sistema")
+
         # Aba 1: Aplicativos (só processos com janela visível)
         self.tab_apps = QWidget()
         self.setup_tab_apps()
@@ -229,6 +243,27 @@ class LogWatchMainWindow(QMainWindow):
         self.statusBar().showMessage("Iniciando monitoramento...")
 
         self._setup_tray_icon()
+
+    def setup_tab_system(self):
+        """Aba de visão geral: uso total de CPU/memória da máquina, não de
+        um processo específico."""
+        layout = QVBoxLayout(self.tab_system)
+
+        info = QLabel("💻 Uso total do sistema (CPU e memória da máquina, não por processo)")
+        info.setStyleSheet("font-weight: bold;")
+        layout.addWidget(info)
+
+        self.system_cpu_label = QLabel("CPU: —")
+        self.system_cpu_label.setStyleSheet(f"color: {COLOR_TEXT_BRIGHT}; font-size: 13pt; font-weight: bold;")
+        layout.addWidget(self.system_cpu_label)
+
+        self.system_memory_label = QLabel("Memória: —")
+        self.system_memory_label.setStyleSheet(f"color: {COLOR_ACCENT}; font-size: 13pt; font-weight: bold;")
+        layout.addWidget(self.system_memory_label)
+
+        layout.addWidget(QLabel("Histórico (CPU % / Memória %):"))
+        self.system_history_chart = HistoryChartWidget(max_points=_HISTORY_MAX_POINTS)
+        layout.addWidget(self.system_history_chart)
 
     def _build_process_table(self) -> QTableWidget:
         """Cria uma QTableWidget no formato usado pelas abas de processos."""
@@ -421,6 +456,15 @@ class LogWatchMainWindow(QMainWindow):
         """Callback quando processos são listados."""
         self.all_processes = snapshots
         self.update_process_list()
+
+    def on_system_stats_updated(self, stats: SystemStats):
+        """Callback com o uso total de CPU/memória da máquina."""
+        self.system_cpu_label.setText(f"CPU: {stats.cpu_percent:.1f}%")
+        self.system_memory_label.setText(
+            f"Memória: {stats.memory_used_gb:.1f} GB / {stats.memory_total_gb:.1f} GB "
+            f"({stats.memory_percent:.1f}%)"
+        )
+        self.system_history_chart.add_point(stats.cpu_percent, stats.memory_percent)
 
     def on_process_clicked(self, item):
         """Quando clica em um processo em qualquer uma das tabelas

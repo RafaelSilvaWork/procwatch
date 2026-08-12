@@ -6,11 +6,22 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional, Set
 from datetime import datetime
-from .models import ProcessSnapshot
+from .models import ProcessSnapshot, SystemStats
 from .security_check import SYSTEM_PROCESS_NAMES, is_suspicious_path
 from .window_utils import get_pids_with_visible_window
 
 logger = logging.getLogger(__name__)
+
+
+def get_system_stats() -> SystemStats:
+    """Uso total do sistema (não por processo)."""
+    vm = psutil.virtual_memory()
+    return SystemStats(
+        cpu_percent=psutil.cpu_percent(interval=None),
+        memory_percent=vm.percent,
+        memory_used_gb=vm.used / (1024 ** 3),
+        memory_total_gb=vm.total / (1024 ** 3),
+    )
 
 
 def snapshot_from_pid(pid: int) -> Optional[ProcessSnapshot]:

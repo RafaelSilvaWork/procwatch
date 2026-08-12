@@ -47,6 +47,16 @@ class ProcessSnapshot:
 
 
 @dataclass
+class SystemStats:
+    """Uso total do sistema (CPU/memória da máquina, não de um processo)."""
+    cpu_percent: float
+    memory_percent: float
+    memory_used_gb: float
+    memory_total_gb: float
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
 class AlertEvent:
     """Evento de alerta gerado pelo sistema."""
     title: str

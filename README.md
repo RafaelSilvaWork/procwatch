@@ -91,5 +91,5 @@ python -m unittest discover -s tests -v
 
 ```bash
 pip install -r requirements-dev.txt
-pyinstaller --name ProcWatch --onefile --noconsole desktop/main.py
+pyinstaller --name ProcWatch --onefile --noconsole --icon desktop/resources/icon.ico --add-data "desktop/resources;desktop/resources" desktop/main.py
 ```

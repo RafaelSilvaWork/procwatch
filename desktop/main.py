@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup, QCheckBox
 )
 from PyQt6.QtCore import QThread, QObject, QTimer, pyqtSignal, Qt
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QColor, QFont, QIcon
 
 from backend.app import ProcWatchApp
 from backend.logging_config import setup_logging
@@ -38,6 +38,22 @@ logger = logging.getLogger(__name__)
 
 _NUMERIC_COLUMNS = {0, 2, 3, 4}  # PID, CPU %, Memória (MB), Memória %
 _HISTORY_MAX_POINTS = 150
+
+
+def _base_dir() -> str:
+    """Raiz do projeto (ou do bundle, quando empacotado com PyInstaller) -
+    onde procurar recursos como desktop/resources/icon.ico."""
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def load_app_icon() -> QIcon:
+    icon_path = os.path.join(_base_dir(), "desktop", "resources", "icon.ico")
+    icon = QIcon(icon_path)
+    if icon.isNull():
+        logger.warning("Ícone do app não encontrado em %s", icon_path)
+    return icon
 
 # Paleta de identificação de processo no log combinado - reaproveita tokens
 # já existentes (nenhuma cor nova). Usada só como identificador visual por
@@ -129,6 +145,7 @@ class ProcWatchMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ProcWatch | Monitor de Processos e Logs")
+        self.setWindowIcon(load_app_icon())
 
         # Monitor roda a cada 2s (menos pesado)
         self.process_monitor_thread = ProcessMonitorThread(interval=2.0, max_processes=200)
@@ -539,7 +556,9 @@ class ProcWatchMainWindow(QMainWindow):
             logger.warning("Bandeja do sistema não disponível neste ambiente.")
             return
 
-        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        icon = load_app_icon()
+        if icon.isNull():
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self.tray_icon = QSystemTrayIcon(icon, self)
         self.tray_icon.setToolTip("ProcWatch")
 
@@ -1169,6 +1188,7 @@ def main() -> int:
     logger.info("Iniciando ProcWatch.")
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(load_app_icon())
     app.setStyleSheet(STYLESHEET)
     window = ProcWatchMainWindow()
     window.show()

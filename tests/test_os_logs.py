@@ -8,17 +8,22 @@ import os
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import win32evtlog
 
-from backend.os_logs import buscar_logs_sistema
+from backend.os_logs import buscar_erros_criticos_do_processo, buscar_logs_sistema
 
 
-def _fake_event(event_type, source="Origem", generated="2026-01-01 00:00:00"):
-    return types.SimpleNamespace(EventType=event_type, SourceName=source, TimeGenerated=generated)
+def _fake_event(event_type, source="Origem", generated=None, message=None):
+    return types.SimpleNamespace(
+        EventType=event_type, SourceName=source,
+        TimeGenerated=generated or datetime(2026, 1, 1, 12, 0, 0),
+        _message=message,
+    )
 
 
 class BuscarLogsSistemaTests(unittest.TestCase):
@@ -71,6 +76,108 @@ class BuscarLogsSistemaTests(unittest.TestCase):
         # derrubar o resto do app, só essa aba fica vazia.
         with patch("backend.os_logs.win32evtlog.OpenEventLog", side_effect=Exception("acesso negado")):
             resultado = buscar_logs_sistema(log_type="Security", num_registros=10)
+
+        self.assertEqual(resultado, [])
+
+
+def _by_message(events_por_msg):
+    """SafeFormatMessage fake que devolve uma mensagem diferente por
+    evento, casada por identidade do objeto - necessário quando um teste
+    precisa de vários eventos com conteúdo diferente na mesma chamada."""
+    return lambda event, _log_type=None: events_por_msg[id(event)]
+
+
+class BuscarErrosCriticosDoProcessoTests(unittest.TestCase):
+    def test_matches_error_from_crash_related_source_mentioning_the_process(self):
+        evento = _fake_event(win32evtlog.EVENTLOG_ERROR_TYPE, source="Application Error")
+        with patch("backend.os_logs.win32evtlog.OpenEventLog", return_value=object()), \
+             patch("backend.os_logs.win32evtlog.ReadEventLog", return_value=[evento]), \
+             patch("backend.os_logs.win32evtlogutil.SafeFormatMessage",
+                   return_value="Faulting application name: jogo.exe, faulting module: MSVCP140.dll"), \
+             patch("backend.os_logs.win32evtlog.CloseEventLog"):
+            resultado = buscar_erros_criticos_do_processo("jogo.exe")
+
+        self.assertEqual(len(resultado), 1)
+        self.assertEqual(resultado[0]["origem"], "Application Error")
+
+    def test_ignores_non_error_severity_even_from_a_crash_related_source(self):
+        # Um WARNING de "Application Error" (raro, mas possível) não é o
+        # crash que estamos procurando.
+        evento = _fake_event(win32evtlog.EVENTLOG_WARNING_TYPE, source="Application Error")
+        with patch("backend.os_logs.win32evtlog.OpenEventLog", return_value=object()), \
+             patch("backend.os_logs.win32evtlog.ReadEventLog", return_value=[evento]), \
+             patch("backend.os_logs.win32evtlogutil.SafeFormatMessage", return_value="jogo.exe travou"), \
+             patch("backend.os_logs.win32evtlog.CloseEventLog"):
+            resultado = buscar_erros_criticos_do_processo("jogo.exe")
+
+        self.assertEqual(resultado, [])
+
+    def test_ignores_error_from_a_source_unrelated_to_crashes(self):
+        # Um app pode logar seu próprio ERRO no log de Aplicativo por
+        # qualquer motivo interno - isso não é "o Windows detectou uma
+        # falha real", é ruído genérico que check_log_entry já cobre.
+        evento = _fake_event(win32evtlog.EVENTLOG_ERROR_TYPE, source="MinhaAppCustomizada")
+        with patch("backend.os_logs.win32evtlog.OpenEventLog", return_value=object()), \
+             patch("backend.os_logs.win32evtlog.ReadEventLog", return_value=[evento]), \
+             patch("backend.os_logs.win32evtlogutil.SafeFormatMessage", return_value="jogo.exe: erro genérico"), \
+             patch("backend.os_logs.win32evtlog.CloseEventLog"):
+            resultado = buscar_erros_criticos_do_processo("jogo.exe")
+
+        self.assertEqual(resultado, [])
+
+    def test_ignores_crash_event_from_an_unrelated_process(self):
+        evento = _fake_event(win32evtlog.EVENTLOG_ERROR_TYPE, source="Application Error")
+        with patch("backend.os_logs.win32evtlog.OpenEventLog", return_value=object()), \
+             patch("backend.os_logs.win32evtlog.ReadEventLog", return_value=[evento]), \
+             patch("backend.os_logs.win32evtlogutil.SafeFormatMessage",
+                   return_value="Faulting application name: outroprograma.exe"), \
+             patch("backend.os_logs.win32evtlog.CloseEventLog"):
+            resultado = buscar_erros_criticos_do_processo("jogo.exe")
+
+        self.assertEqual(resultado, [])
+
+    def test_name_matching_is_case_insensitive(self):
+        evento = _fake_event(win32evtlog.EVENTLOG_ERROR_TYPE, source="Application Error")
+        with patch("backend.os_logs.win32evtlog.OpenEventLog", return_value=object()), \
+             patch("backend.os_logs.win32evtlog.ReadEventLog", return_value=[evento]), \
+             patch("backend.os_logs.win32evtlogutil.SafeFormatMessage",
+                   return_value="Faulting application name: JOGO.EXE"), \
+             patch("backend.os_logs.win32evtlog.CloseEventLog"):
+            resultado = buscar_erros_criticos_do_processo("jogo.exe")
+
+        self.assertEqual(len(resultado), 1)
+
+    def test_stops_at_events_older_than_desde_cutoff(self):
+        agora = datetime(2026, 1, 1, 12, 0, 0)
+        # Leitura é EVENTLOG_BACKWARDS_READ - mais recente primeiro.
+        recente = _fake_event(win32evtlog.EVENTLOG_ERROR_TYPE, source="Application Error",
+                               generated=agora, message="Faulting application name: jogo.exe (novo)")
+        antigo = _fake_event(win32evtlog.EVENTLOG_ERROR_TYPE, source="Application Error",
+                              generated=agora - timedelta(hours=2), message="Faulting application name: jogo.exe (antigo)")
+
+        with patch("backend.os_logs.win32evtlog.OpenEventLog", return_value=object()), \
+             patch("backend.os_logs.win32evtlog.ReadEventLog", return_value=[recente, antigo]), \
+             patch("backend.os_logs.win32evtlogutil.SafeFormatMessage",
+                   side_effect=_by_message({id(recente): recente._message, id(antigo): antigo._message})), \
+             patch("backend.os_logs.win32evtlog.CloseEventLog"):
+            resultado = buscar_erros_criticos_do_processo("jogo.exe", desde=agora - timedelta(minutes=30))
+
+        self.assertEqual(len(resultado), 1)
+        self.assertIn("novo", resultado[0]["mensagem"])
+
+    def test_respects_num_registros_limit(self):
+        eventos = [_fake_event(win32evtlog.EVENTLOG_ERROR_TYPE, source="Application Error") for _ in range(10)]
+        with patch("backend.os_logs.win32evtlog.OpenEventLog", return_value=object()), \
+             patch("backend.os_logs.win32evtlog.ReadEventLog", return_value=eventos), \
+             patch("backend.os_logs.win32evtlogutil.SafeFormatMessage", return_value="jogo.exe falhou"), \
+             patch("backend.os_logs.win32evtlog.CloseEventLog"):
+            resultado = buscar_erros_criticos_do_processo("jogo.exe", num_registros=3)
+
+        self.assertEqual(len(resultado), 3)
+
+    def test_log_open_failure_returns_empty_list_without_raising(self):
+        with patch("backend.os_logs.win32evtlog.OpenEventLog", side_effect=Exception("acesso negado")):
+            resultado = buscar_erros_criticos_do_processo("jogo.exe")
 
         self.assertEqual(resultado, [])
 

@@ -3,12 +3,14 @@ bloquear a UI (listagem de processos e checagem do engine de alertas)."""
 
 import logging
 import threading
-from typing import List
+from datetime import datetime
+from typing import Dict, List
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from backend.alert_engine import AlertEngine
 from backend.models import AlertEvent, AlertSource, ProcessSnapshot
+from backend.os_logs import buscar_erros_criticos_do_processo
 from backend.process_monitor import ProcessMonitor, get_system_stats
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,10 @@ class AlertWorker(QObject):
         super().__init__()
         self.engine = AlertEngine()
         self.engine.subscribe(self.alert_triggered.emit)
+        # PID -> horário em que passou a ser monitorado. Usado pra ignorar,
+        # na correlação com o Visualizador de Eventos, falhas antigas de
+        # antes da execução atual (um crash de ontem não é notícia hoje).
+        self._monitor_start: Dict[int, datetime] = {}
 
     def check_processes(self, snapshots: List[ProcessSnapshot]):
         self.engine.check_processes(snapshots)
@@ -71,3 +77,28 @@ class AlertWorker(QObject):
 
     def check_process_exit(self, name: str, pid: int, exit_code: int):
         self.engine.check_process_exit(name, pid, exit_code)
+
+    def track_monitoring_start(self, pid: int):
+        self._monitor_start[pid] = datetime.now()
+
+    def stop_tracking(self, pid: int):
+        self._monitor_start.pop(pid, None)
+
+    def check_os_log_events(self, monitored: Dict[int, str]):
+        """Correlaciona o Visualizador de Eventos do Windows com cada
+        processo monitorado que tem um horário de início rastreado. Roda na
+        thread própria do worker - ler o log de eventos pode ser lento o
+        bastante pra não fazer isso na thread da UI."""
+        for pid, name in monitored.items():
+            desde = self._monitor_start.get(pid)
+            if desde is None:
+                continue
+            try:
+                eventos = buscar_erros_criticos_do_processo(name, desde=desde)
+            except Exception:
+                logger.exception("Erro ao checar eventos do Windows para %s (PID %s)", name, pid)
+                continue
+            for evento in eventos:
+                self.engine.check_os_log_correlation(
+                    name, pid, evento["origem"], evento["data"], evento["mensagem"]
+                )

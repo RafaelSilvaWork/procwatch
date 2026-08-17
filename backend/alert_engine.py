@@ -335,6 +335,32 @@ class AlertEngine:
                     )
                     self._suppress_for(alert_id, 300)
 
+    def check_os_log_correlation(self, process_name: str, pid: int, origem: str, quando: str, mensagem: str) -> None:
+        """Falha REAL de um processo monitorado, registrada pelo próprio
+        Windows (crash via Windows Error Reporting, exceção não tratada do
+        .NET, dependência ausente via SideBySide) - informação que o
+        usuário não teria como perceber sozinho olhando a tela, ao
+        contrário de uma janela travada. Por isso é sempre CRITICAL,
+        independente de threshold ou palavra-chave configurada."""
+        alert_id = f"os_log_{pid}_{origem}_{quando}"
+        if alert_id in self._suppressed_alerts:
+            return
+
+        self._emit_alert(
+            AlertEvent(
+                title=f"Falha Registrada pelo Windows - {process_name}",
+                message=f"[{origem}] {mensagem[:200]}",
+                severity=AlertSeverity.CRITICAL,
+                source=AlertSource.OS_LOG,
+                process_pid=pid,
+                process_name=process_name,
+                extra_data={'origem': origem, 'evento_em': quando}
+            )
+        )
+        # 1h: o mesmo evento do Visualizador de Eventos não muda nem some -
+        # sem isso, ele seria re-emitido a cada checagem periódica.
+        self._suppress_for(alert_id, 3600)
+
     def check_process_exit(self, name: str, pid: int, exit_code: int) -> None:
         """Processo lançado/monitorado pelo ProcWatch encerrou. Ao contrário
         de check_log_entry, é um evento estruturado (não depende de

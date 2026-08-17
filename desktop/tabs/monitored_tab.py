@@ -176,6 +176,7 @@ Threads:           {process.num_threads}
             if not skip_log_watch:
                 self._start_process_log_watch(process)
 
+            self.monitoring_started.emit(pid)
             self._update_monitored_summary()
             self._update_logs_tab_label()
 
@@ -226,6 +227,7 @@ Threads:           {process.num_threads}
             self.monitored_pids.remove(pid)
         self.process_monitor_thread.unpin_pid(pid)
         self.log_watch_app.stop_watching_pid(pid)
+        self.monitoring_stopped.emit(pid)
         self.process_history.pop(pid, None)
         self._monitored_names.pop(pid, None)
         self._pid_log_colors.pop(pid, None)
@@ -252,6 +254,14 @@ Threads:           {process.num_threads}
 
         self._update_monitored_summary()
         self._update_logs_tab_label()
+
+    def _trigger_os_log_check(self):
+        """Pede ao AlertWorker (thread própria) pra correlacionar o
+        Visualizador de Eventos do Windows com os processos monitorados
+        agora. dict(...) copia o mapa - o worker lê isso em outra thread,
+        não pode compartilhar o dict "ao vivo" da UI."""
+        if self.monitored_pids:
+            self.os_log_check_requested.emit(dict(self._monitored_names))
 
     def _assign_log_color(self, pid: int) -> str:
         """Atribui uma cor de identificação (rotação por ordem de adição)

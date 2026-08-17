@@ -63,6 +63,9 @@ class ProcWatchMainWindow(
     elas: estado compartilhado, montagem da janela, bandeja e ciclo de vida."""
 
     log_line_received = pyqtSignal(int, str, str)  # (pid, caminho/rótulo, linha)
+    monitoring_started = pyqtSignal(int)  # pid
+    monitoring_stopped = pyqtSignal(int)  # pid
+    os_log_check_requested = pyqtSignal(dict)  # {pid: nome}
 
     def __init__(self):
         super().__init__()
@@ -125,6 +128,13 @@ class ProcWatchMainWindow(
         self.process_monitor_thread.system_stats_updated.connect(self.on_system_stats_updated)
         self.alert_worker.alert_triggered.connect(self.on_alert_triggered)
         self.log_line_received.connect(self._append_filtered_log)
+        # Conexões em fila (worker mora em outra thread): avisam o
+        # AlertWorker de quando cada PID começou/parou de ser monitorado, e
+        # disparam a checagem periódica do Visualizador de Eventos - tudo
+        # roda na thread do worker, não na da UI.
+        self.monitoring_started.connect(self.alert_worker.track_monitoring_start)
+        self.monitoring_stopped.connect(self.alert_worker.stop_tracking)
+        self.os_log_check_requested.connect(self.alert_worker.check_os_log_events)
 
         self.process_monitor_thread.start()
         self.alert_thread.start()
@@ -135,6 +145,13 @@ class ProcWatchMainWindow(
         self.log_rescan_timer = QTimer(self)
         self.log_rescan_timer.timeout.connect(self._rescan_process_logs)
         self.log_rescan_timer.start(5_000)
+
+        # Cadência mais lenta que o rescan de log: ler o Visualizador de
+        # Eventos do Windows é mais pesado que checar arquivo, e um crash
+        # relatado pelo Windows não é algo que precise de reação em <1min.
+        self.os_log_check_timer = QTimer(self)
+        self.os_log_check_timer.timeout.connect(self._trigger_os_log_check)
+        self.os_log_check_timer.start(30_000)
 
     def _apply_default_geometry(self):
         """Tamanho proporcional à tela atual (75%), centralizado - em vez de

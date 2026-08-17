@@ -107,6 +107,42 @@ class AlertEngineTests(unittest.TestCase):
 
         self.assertEqual(len(self.received), 1)
 
+    def test_os_log_correlation_triggers_critical_alert(self):
+        """Falha registrada pelo próprio Windows (crash, dependência
+        ausente) é informação que o usuário não teria como perceber
+        sozinho - por isso sempre CRITICAL, sem depender de threshold."""
+        self.engine.check_os_log_correlation(
+            "jogo.exe", 555, "Application Error", "2026-01-01 10:00:00",
+            "Faulting application name: jogo.exe, faulting module: MSVCP140.dll",
+        )
+
+        self.assertEqual(len(self.received), 1)
+        self.assertEqual(self.received[0].severity, AlertSeverity.CRITICAL)
+        self.assertEqual(self.received[0].process_pid, 555)
+
+    def test_os_log_correlation_same_event_is_suppressed_on_repeat(self):
+        # A checagem periódica pode ver o MESMO evento do Visualizador de
+        # Eventos em vários ciclos seguidos - não pode virar um alerta novo
+        # a cada vez.
+        self.engine.check_os_log_correlation(
+            "jogo.exe", 555, "Application Error", "2026-01-01 10:00:00", "falha"
+        )
+        self.engine.check_os_log_correlation(
+            "jogo.exe", 555, "Application Error", "2026-01-01 10:00:00", "falha"
+        )
+
+        self.assertEqual(len(self.received), 1)
+
+    def test_os_log_correlation_different_event_is_not_suppressed(self):
+        self.engine.check_os_log_correlation(
+            "jogo.exe", 555, "Application Error", "2026-01-01 10:00:00", "falha 1"
+        )
+        self.engine.check_os_log_correlation(
+            "jogo.exe", 555, "Application Error", "2026-01-01 10:05:00", "falha 2"
+        )
+
+        self.assertEqual(len(self.received), 2)
+
     def test_below_threshold_does_not_alert(self):
         self.engine.check_processes([make_snapshot(cpu=10.0, mem=10.0)])
 

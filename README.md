@@ -14,6 +14,9 @@ Monitor de processos, logs e alertas para Windows, com interface em PyQt6.
 - Motor de alertas com thresholds configuráveis (CPU/memória crítica e de aviso, CPU
   sustentada, vazamento de memória, processos zumbis) e palavras-chave de detecção de
   erro customizáveis pelo usuário, tudo persistido entre execuções.
+- Correlação automática com o Visualizador de Eventos do Windows: alerta quando o
+  próprio Windows registra uma falha real (crash, dependência ausente) de um processo
+  monitorado, mesmo que ele não feche nem escreva nada no log.
 - Ícone na bandeja do sistema com notificações nativas para alertas críticos - fechar a
   janela minimiza para a bandeja e o monitoramento continua em segundo plano.
 - Exportação de alertas (CSV) e de logs filtrados (texto).

@@ -19,6 +19,7 @@ class AlertSource(Enum):
     PROCESS = "Processo"
     SYSTEM = "Sistema"
     APP_LOG = "Log da App"
+    OS_LOG = "Log do Windows"
 
 
 @dataclass

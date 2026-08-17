@@ -182,6 +182,20 @@ class LaunchAndWatchTests(unittest.TestCase):
         if sys.platform == "win32":
             self.assertEqual(kwargs["creationflags"], subprocess.CREATE_NO_WINDOW)
 
+    def test_launches_with_cwd_set_to_the_executables_own_folder(self):
+        # Sem isso, a pasta de trabalho seria a do ProcWatch, não a do
+        # programa lançado - quebra jogos/apps que carregam DLL/assets por
+        # caminho relativo (o que o Explorer resolve sozinho num duplo-clique).
+        app = ProcWatchApp()
+        proc = self._fake_popen()
+
+        with patch("backend.app.subprocess.Popen", return_value=proc) as MockPopen, \
+             patch("backend.app.ProcWatchApp._watch_subprocess_output"):
+            app.launch_and_watch(r"C:\jogos\MeuJogo\jogo.exe", lambda *_: None, lambda *_: None)
+
+        _args, kwargs = MockPopen.call_args
+        self.assertEqual(kwargs["cwd"], r"C:\jogos\MeuJogo")
+
     def test_watches_both_stdout_and_stderr(self):
         tail = _RecordingTail()
         app = ProcWatchApp()

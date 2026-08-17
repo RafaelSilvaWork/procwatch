@@ -1,6 +1,7 @@
 """Descoberta e monitoramento dos arquivos de log de processos monitorados,
 e lançamento/acompanhamento de um novo processo pelo próprio ProcWatch."""
 
+import os
 import subprocess
 import sys
 import threading
@@ -78,6 +79,10 @@ class ProcWatchApp:
         encerrar (on_exit(pid, código_de_saída)). Não afeta o
         acompanhamento de outros processos já sendo monitorados."""
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        # cwd = pasta do próprio executável, igual ao Explorer faz num duplo-
+        # clique. Sem isso, a pasta de trabalho seria a do ProcWatch, e
+        # programas que carregam DLLs/assets/config por caminho relativo à
+        # própria pasta (comum em jogos) podem falhar ao abrir.
         proc = subprocess.Popen(
             [path],
             stdout=subprocess.PIPE,
@@ -85,6 +90,7 @@ class ProcWatchApp:
             text=True,
             bufsize=1,
             creationflags=creationflags,
+            cwd=os.path.dirname(path) or None,
         )
 
         self._watch_subprocess_output(proc, on_line)

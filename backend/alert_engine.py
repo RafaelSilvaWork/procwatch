@@ -3,9 +3,7 @@
 import logging
 import os
 import threading
-import time
 from typing import Callable, Dict, List, Optional, Set
-from datetime import datetime, timedelta
 from collections import defaultdict
 
 from .models import ProcessSnapshot, AlertEvent, AlertSeverity, AlertSource
@@ -312,7 +310,7 @@ class AlertEngine:
                 if alert_id not in self._suppressed_alerts:
                     self._emit_alert(
                         AlertEvent(
-                            title=f"Erro Crítico Detectado",
+                            title="Erro Crítico Detectado",
                             message=f"{source.value}: {message[:100]}...",
                             severity=AlertSeverity.CRITICAL,
                             source=source,
@@ -328,7 +326,7 @@ class AlertEngine:
                 if alert_id not in self._suppressed_alerts:
                     self._emit_alert(
                         AlertEvent(
-                            title=f"Aviso de Erro",
+                            title="Aviso de Erro",
                             message=f"{source.value}: {message[:100]}...",
                             severity=AlertSeverity.WARNING,
                             source=source,

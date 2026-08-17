@@ -4,8 +4,7 @@ import logging
 import psutil
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Set
-from datetime import datetime
+from typing import Callable, List, Optional, Set
 from .models import ProcessSnapshot, SystemStats
 from .security_check import SYSTEM_PROCESS_NAMES, is_suspicious_path
 from .window_utils import get_pids_with_visible_window

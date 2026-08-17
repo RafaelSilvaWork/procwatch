@@ -19,7 +19,10 @@ jobs:
           python-version: "3.11"
 
       - name: Instalar dependências
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pyflakes
+
+      - name: Lint (pyflakes)
+        run: python -m pyflakes backend desktop tests
 
       - name: Rodar testes
         run: python -m unittest discover -s tests -v
